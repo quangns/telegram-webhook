@@ -471,10 +471,12 @@ function sendTestMessage() {
 // Mẫu từ khóa/regex cho từng danh mục
 // Mẫu từ khóa cho từng danh mục (sử dụng so khớp chuỗi để tương thích Unicode)
 var CATEGORY_PATTERNS = {
-  "lương thưởng": ["lương","thưởng","salary","bonus","payroll","được","nhận","chuyển khoản"],
+  "lương thưởng": ["lương","thưởng","salary","bonus","payroll","nhận","chuyển khoản"],
   "ăn uống": ["nhà hàng","ăn uống","ăn tối","ăn trưa","ăn sáng","ăn","cơm","quán","cafe","cà phê","trà sữa","phở","bún","ăn vặt","ăn nhẹ","siêu thị","grocery","chợ"],
-  "xăng xe": ["xăng","đổ xăng","bơm xăng","nhien lieu","nhiên liệu","petrol","diesel","gas","xăng xe","đổ","rút xăng","gửi xe","thuê xe","xe ôm","grab","taxi","xe máy","xe tải"],
-  "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet"]
+  "xăng xe": ["gửi xe","xăng","đổ xăng","bơm xăng","nhien lieu","nhiên liệu","petrol","diesel","gas","xăng xe","đổ","rút xăng","thuê xe","xe ôm","grab","taxi","xe máy","xe tải"],
+  "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet"],
+  "được cho": ["được"],
+  "quan hệ": ["mừng","đám","hiếu","hỉ","gửi","mừng cưới","đám cưới","đám hỏi","đám tang"]
 };
 
 /**
