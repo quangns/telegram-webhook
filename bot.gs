@@ -112,18 +112,8 @@ Trạng thái: ✅ Hoạt động`;
       const amountStr = parts[parts.length - 1];
       const description = parts.slice(descriptionStart, -1).join(' ');
       
-      // Xử lý viết tắt số tiền
-      let multiplier = 1;
-      let cleanAmountStr = amountStr.replace(/,/g, '');
-      if (cleanAmountStr.toLowerCase().endsWith('tr')) {
-        multiplier = 1000000;
-        cleanAmountStr = cleanAmountStr.slice(0, -2);
-      } else if (cleanAmountStr.toLowerCase().endsWith('k')) {
-        multiplier = 1000;
-        cleanAmountStr = cleanAmountStr.slice(0, -1);
-      }
-      const baseAmount = parseFloat(cleanAmountStr);
-      const amount = baseAmount * multiplier;
+      // Xử lý viết tắt số tiền (hỗ trợ: 3tr5, 3M5, 3,5M, 3.5M, 3M, 3k, 3,5k...)
+      const amount = parseAmountString(amountStr);
       
       // Kiểm tra nếu mô tả bắt đầu bằng lương, thưởng hoặc chứa chữ "được" thì mặc định thu
       const descLower = description.toLowerCase();
@@ -306,14 +296,46 @@ function markUpdateProcessed(updateId) {
 // ============================================
 function logFinanceCommand(username, type, description, amount) {
   try {
-    const spreadsheet = SpreadsheetApp.openById(SHEET_ID);
-    let sheet = spreadsheet.getSheetByName("FinanceLogs");
+    var spreadsheet = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = spreadsheet.getSheetByName("FinanceLogs");
+    var desiredHeaders = ["Thời gian", "Username", "Loại", "Danh mục", "Mô tả", "Số tiền (VND)"];
     if (!sheet) {
       sheet = spreadsheet.insertSheet("FinanceLogs");
-      sheet.appendRow(["Thời gian", "Username", "Loại", "Mô tả", "Số tiền (VND)"]);
+      sheet.appendRow(desiredHeaders);
     }
-    sheet.appendRow([new Date().toLocaleString('vi-VN'), username, type === 'thu' ? 'Thu' : 'Chi', description, amount]);
-    Logger.log(`Logged /log command: ${username} -> ${type} ${description} ${amount}`);
+
+    var lastCol = sheet.getLastColumn();
+    if (lastCol === 0) {
+      sheet.appendRow(desiredHeaders);
+      lastCol = sheet.getLastColumn();
+    }
+
+    var currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    // Ensure any missing desired headers exist (append at end)
+    for (var i = 0; i < desiredHeaders.length; i++) {
+      if (currentHeaders.indexOf(desiredHeaders[i]) === -1) {
+        sheet.getRange(1, sheet.getLastColumn() + 1).setValue(desiredHeaders[i]);
+        currentHeaders.push(desiredHeaders[i]);
+      }
+    }
+
+    var category = classifyDescription(description);
+
+    // Build row aligned to currentHeaders
+    var row = new Array(currentHeaders.length).fill('');
+    function setVal(h, v) {
+      var idx = currentHeaders.indexOf(h);
+      if (idx !== -1) row[idx] = v;
+    }
+    setVal("Thời gian", new Date().toLocaleString('vi-VN'));
+    setVal("Username", username);
+    setVal("Loại", type === 'thu' ? 'Thu' : 'Chi');
+    setVal("Danh mục", category);
+    setVal("Mô tả", description);
+    setVal("Số tiền (VND)", amount);
+
+    sheet.appendRow(row);
+    Logger.log("Logged /log command: " + username + " -> " + type + " " + description + " " + amount + " (category=" + category + ")");
   } catch (error) {
     Logger.log("Error logging /log command: " + error.toString());
   }
@@ -439,4 +461,181 @@ function sendTestMessage() {
   const testMessage = `🧪 Test message từ Google Apps Script\nThời gian: ${new Date().toLocaleString('vi-VN')}`;
   sendMessage(CHAT_ID, testMessage);
   Logger.log("Test message sent!");
+}
+
+// ============================================
+// PHẦN BỔ SUNG: PHÂN LOẠI MÔ TẢ GIAO DỊCH
+// Không xóa hoặc thay thế phần nào trong file, chỉ bổ sung thêm code
+// ============================================
+
+// Mẫu từ khóa/regex cho từng danh mục
+// Mẫu từ khóa cho từng danh mục (sử dụng so khớp chuỗi để tương thích Unicode)
+var CATEGORY_PATTERNS = {
+  "lương thưởng": ["lương","thưởng","salary","bonus","payroll","được","nhận","chuyển khoản"],
+  "ăn uống": ["nhà hàng","ăn uống","ăn tối","ăn trưa","ăn sáng","ăn","cơm","quán","cafe","cà phê","trà sữa","phở","bún","ăn vặt","ăn nhẹ","siêu thị","grocery","chợ"],
+  "xăng xe": ["xăng","đổ xăng","bơm xăng","nhien lieu","nhiên liệu","petrol","diesel","gas","xăng xe","đổ","rút xăng","gửi xe","thuê xe","xe ôm","grab","taxi","xe máy","xe tải"],
+  "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet"]
+};
+
+/**
+ * Phân tích chuỗi số tiền và trả về số tiền bằng VND (số nguyên).
+ * Hỗ trợ: "3tr5", "3M5", "3,5M", "3.5M", "3M", "3k", "35000".
+ */
+function parseAmountString(raw) {
+  if (raw == null) return NaN;
+  var s = String(raw).toLowerCase().trim();
+  // remove spaces
+  s = s.replace(/\s+/g, '');
+
+  // if plain number with commas or dots: "47,000" or "47000"
+  if (/^[\d.,]+$/.test(s)) {
+    var num = parseFloat(s.replace(/,/g, '.'));
+    return isNaN(num) ? NaN : Math.round(num);
+  }
+
+  // handle k (thousand)
+  var m;
+  m = s.match(/^([\d.,]+)k$/);
+  if (m) {
+    var n = parseFloat(m[1].replace(/,/g, '.'));
+    return isNaN(n) ? NaN : Math.round(n * 1000);
+  }
+
+  // normalize m -> tr (million)
+  s = s.replace(/m/g, 'tr');
+
+  // handle formats like 3.5tr or 3,5tr
+  m = s.match(/^([\d]+)[.,]?([\d]+)?tr$/);
+  if (m) {
+    var intPart = parseInt(m[1], 10);
+    var fracPart = m[2] ? (parseFloat('0.' + m[2])) : 0;
+    if (isNaN(intPart) || isNaN(fracPart)) return NaN;
+    return Math.round((intPart + fracPart) * 1000000);
+  }
+
+  // handle compact form like 3tr5 or 3tr50 (means 3 + 0.5 or 3 + 0.50)
+  m = s.match(/^(\d+)tr(\d+)$/);
+  if (m) {
+    var a = parseInt(m[1], 10);
+    var bstr = m[2];
+    var bnum = parseInt(bstr, 10);
+    if (isNaN(a) || isNaN(bnum)) return NaN;
+    var frac = bnum / Math.pow(10, bstr.length);
+    return Math.round((a + frac) * 1000000);
+  }
+
+  // handle trailing 'tr' like '3tr'
+  m = s.match(/^(\d+)tr$/);
+  if (m) {
+    var a2 = parseInt(m[1], 10);
+    return isNaN(a2) ? NaN : a2 * 1000000;
+  }
+
+  // fallback: try parseFloat of digits in string
+  m = s.match(/([\d.,]+)/);
+  if (m) {
+    var p = parseFloat(m[1].replace(/,/g, '.'));
+    return isNaN(p) ? NaN : Math.round(p);
+  }
+
+  return NaN;
+}
+
+/**
+ * Phân loại một chuỗi mô tả thành một danh mục.
+ * Trả về tên danh mục (ví dụ: "ăn uống") hoặc "khác" nếu không khớp.
+ */
+function classifyDescription(text) {
+  if (text == null) return "khác";
+  var s = String(text).toLowerCase();
+  // Loại bỏ dấu câu để tăng độ chính xác khi so khớp
+  s = s.replace(/[.,;:!"'()\[\]\/\\-]/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  for (var cat in CATEGORY_PATTERNS) {
+    var patterns = CATEGORY_PATTERNS[cat];
+    for (var i = 0; i < patterns.length; i++) {
+      var kw = patterns[i].toLowerCase();
+      if (!kw) continue;
+      if (s.indexOf(kw) !== -1) return cat;
+    }
+  }
+  return "khác";
+}
+
+/**
+ * Duyệt toàn bộ sheet `FinanceLogs`, tạo cột "Danh mục" nếu chưa có,
+ * và điền danh mục cho mỗi dòng dựa trên cột "Mô tả".
+ * Chạy thủ công từ Apps Script editor hoặc gọi từ menu.
+ */
+function reclassifyFinanceLogs() {
+  try {
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = ss.getSheetByName("FinanceLogs");
+    if (!sheet) {
+      Logger.log("Sheet 'FinanceLogs' không tồn tại.");
+      return;
+    }
+
+    var lastCol = sheet.getLastColumn();
+    if (lastCol === 0) {
+      Logger.log("Sheet 'FinanceLogs' rỗng.");
+      return;
+    }
+
+    var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    var descIdx = -1;
+    var catIdx = -1;
+    for (var i = 0; i < headers.length; i++) {
+      var h = String(headers[i]).trim().toLowerCase();
+      if (h === 'mô tả' || h === 'mo ta' || h === 'mota') descIdx = i;
+      if (h === 'danh mục') catIdx = i;
+    }
+
+    if (descIdx === -1) {
+      Logger.log("Header 'Mô tả' không tìm thấy trong 'FinanceLogs'. Vui lòng đảm bảo có cột 'Mô tả'.");
+      return;
+    }
+
+    // Nếu chưa có cột 'Danh mục' thì thêm ở cuối
+    if (catIdx === -1) {
+      sheet.getRange(1, lastCol + 1).setValue('Danh mục');
+      catIdx = lastCol; // chỉ số 0-based
+      lastCol = lastCol + 1;
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      Logger.log('Không có dòng dữ liệu để phân loại.');
+      return;
+    }
+
+    var descRange = sheet.getRange(2, descIdx + 1, lastRow - 1, 1);
+    var descValues = descRange.getValues();
+    var out = [];
+    for (var r = 0; r < descValues.length; r++) {
+      var d = descValues[r][0];
+      out.push([classifyDescription(d)]);
+    }
+
+    sheet.getRange(2, catIdx + 1, out.length, 1).setValues(out);
+    Logger.log('reclassifyFinanceLogs: Đã phân loại ' + out.length + ' dòng.');
+    return out.length;
+  } catch (err) {
+    Logger.log('reclassifyFinanceLogs error: ' + err.toString());
+  }
+}
+
+/**
+ * Tùy chọn: thêm menu vào spreadsheet (chỉ hoạt động nếu script gắn vào spreadsheet)
+ */
+function onOpen() {
+  try {
+    var ui = SpreadsheetApp.getUi();
+    ui.createMenu('Finance')
+      .addItem('Phân loại (Reclassify)', 'reclassifyFinanceLogs')
+      .addToUi();
+  } catch (e) {
+    // Không bắt lỗi nếu script không chạy trong context Spreadsheet
+  }
 }
