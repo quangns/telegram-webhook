@@ -18,12 +18,12 @@ function doPost(e) {
     // Lấy dữ liệu từ request
     const payload = JSON.parse(e.postData.contents);
 
-    // Logger.log("Payload received: " + JSON.stringify(payload));
+    Logger.log("Payload received: " + JSON.stringify(payload));
 
     // Bỏ qua các update đã xử lý trước đó để tránh retry / start cũ
     const updateId = payload.update_id;
     if (updateId != null && isDuplicateUpdate(updateId)) {
-      // Logger.log(`Duplicate or old update skipped: ${updateId}`);
+      Logger.log(`Duplicate or old update skipped: ${updateId}`);
     }
 
     // Ghi update_id đã xử lý
@@ -38,7 +38,7 @@ function doPost(e) {
       handleCallbackQuery(payload.callback_query);
     }
   } catch (error) {
-    // Logger.log("Error: " + error.toString());
+    Logger.log("Error: " + error.toString());
   }
 }
 
@@ -49,10 +49,17 @@ function handleTelegramMessage(message) {
   const chatId = message.chat.id;
   const userId = message.from.id;
   const username = message.from.username || "Unknown";
-  const text = String(message.text || "");
+  let text = String(message.text || "");
   const messageId = message.message_id;
 
-  // Logger.log(`Message from ${username}: ${text}`);
+  // Loại bỏ tên bot khỏi câu lệnh (ví dụ: /log@BOT_NAME -> /log)
+  if (typeof BOT_NAME !== 'undefined' && BOT_NAME) {
+    if (text.startsWith("/") && text.includes(BOT_NAME)) {
+      text = text.replace(BOT_NAME, "");
+    }
+  }
+
+  Logger.log(`Message from ${username}: ${text}`);
 
   // Xử lý các lệnh
   if (text.startsWith("/start")) {
@@ -118,16 +125,18 @@ Trạng thái: ✅ Hoạt động`;
       const baseAmount = parseFloat(cleanAmountStr);
       const amount = baseAmount * multiplier;
       
-      // Kiểm tra nếu mô tả bắt đầu bằng lương hoặc thưởng thì mặc định thu
-      if (description.toLowerCase().startsWith('lương') || description.toLowerCase().startsWith('thưởng')) {
+      // Kiểm tra nếu mô tả bắt đầu bằng lương, thưởng hoặc chứa chữ "được" thì mặc định thu
+      const descLower = description.toLowerCase();
+      if (descLower.startsWith('lương') || descLower.startsWith('thưởng') || descLower.includes('được')) {
         type = 'thu';
       }
       
       if (isNaN(amount) || amount <= 0) {
         sendMessage(chatId, "❌ Số tiền phải là số dương. Ví dụ: /log ăn uống 50000, /log lương 10tr, /log thưởng 5k");
       } else {
-        sendMessage(chatId, `💰 Đã ghi nhận: ${type === 'thu' ? 'Thu' : 'Chi'} ${description} - ${amount.toLocaleString('vi-VN')} VND. Đã lưu vào Google Sheet.`);
-        logFinanceCommand(userId, username, type, description, amount);
+        const nowStr = new Date().toLocaleString('vi-VN');
+        sendMessage(chatId, `💰 Đã ghi nhận: ${type === 'thu' ? 'Thu' : 'Chi'} ${description} - ${amount.toLocaleString('vi-VN')} VND.\n⏱ Thời gian: ${nowStr}\nĐã lưu vào Google Sheet.`);
+        logFinanceCommand(username, type, description, amount);
       }
     }
   }
@@ -163,7 +172,7 @@ function handleCallbackQuery(callbackQuery) {
   const data = typeof callbackQuery.data === 'string' ? callbackQuery.data : "";
   const messageId = callbackQuery.message.message_id;
 
-  // Logger.log(`Callback data: ${data}`);
+  Logger.log(`Callback data: ${data}`);
 
   // Xử lý các button
   if (data === "btn_hello") {
@@ -217,7 +226,7 @@ function sendMessage(chatId, text, replyMarkup = null) {
   };
 
   const response = UrlFetchApp.fetch(url, options);
-  // Logger.log("Send message response: " + response.getContentText());
+  Logger.log("Send message response: " + response.getContentText());
 }
 
 // ============================================
@@ -278,7 +287,7 @@ function isDuplicateUpdate(updateId) {
     const lastId = parseInt(props.getProperty('LAST_UPDATE_ID') || '0', 10);
     return updateId <= lastId;
   } catch (error) {
-    // Logger.log('Error checking duplicate update: ' + error.toString());
+    Logger.log('Error checking duplicate update: ' + error.toString());
     return false;
   }
 }
@@ -288,25 +297,25 @@ function markUpdateProcessed(updateId) {
     const props = PropertiesService.getScriptProperties();
     props.setProperty('LAST_UPDATE_ID', updateId.toString());
   } catch (error) {
-    // Logger.log('Error marking update processed: ' + error.toString());
+    Logger.log('Error marking update processed: ' + error.toString());
   }
 }
 
 // ============================================
 // 6.6. GHI LỆNH /log VÀO GOOGLE SHEET
 // ============================================
-function logFinanceCommand(userId, username, type, description, amount) {
+function logFinanceCommand(username, type, description, amount) {
   try {
     const spreadsheet = SpreadsheetApp.openById(SHEET_ID);
     let sheet = spreadsheet.getSheetByName("FinanceLogs");
     if (!sheet) {
       sheet = spreadsheet.insertSheet("FinanceLogs");
-      sheet.appendRow(["Thời gian", "User ID", "Username", "Loại", "Mô tả", "Số tiền (VND)"]);
+      sheet.appendRow(["Thời gian", "Username", "Loại", "Mô tả", "Số tiền (VND)"]);
     }
-    sheet.appendRow([new Date().toLocaleString('vi-VN'), userId, username, type === 'thu' ? 'Thu' : 'Chi', description, amount]);
-    // Logger.log(`Logged /log command: ${username} -> ${type} ${description} ${amount}`);
+    sheet.appendRow([new Date().toLocaleString('vi-VN'), username, type === 'thu' ? 'Thu' : 'Chi', description, amount]);
+    Logger.log(`Logged /log command: ${username} -> ${type} ${description} ${amount}`);
   } catch (error) {
-    // Logger.log("Error logging /log command: " + error.toString());
+    Logger.log("Error logging /log command: " + error.toString());
   }
 }
 
@@ -350,7 +359,7 @@ function searchPerplexity(query) {
 
     return `❌ Không tìm thấy kết quả cho: "${query}"`;
   } catch (error) {
-    // Logger.log("DuckDuckGo HTML fallback error: " + error.toString());
+    Logger.log("DuckDuckGo HTML fallback error: " + error.toString());
     return "❌ Lỗi khi tìm kiếm. Vui lòng thử lại sau.";
   }
 }
@@ -389,7 +398,7 @@ function setupWebhook() {
   // Thiết lập webhook mới
   var url = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=` + WEBAPPURL + '&drop_pending_updates=true';
   var response = UrlFetchApp.fetch(url);
-  // Logger.log("Setup webhook response: " + response.getContentText());
+  Logger.log("Setup webhook response: " + response.getContentText());
 }
 
 // ============================================
@@ -404,7 +413,7 @@ function deleteWebhook() {
   };
 
   const response = UrlFetchApp.fetch(url, options);
-  // Logger.log("Webhook delete response: " + response.getContentText());
+  Logger.log("Webhook delete response: " + response.getContentText());
 }
 
 // ============================================
@@ -420,7 +429,7 @@ function getWebhookInfo() {
 
   const response = UrlFetchApp.fetch(url, options);
   const result = JSON.parse(response.getContentText());
-  // Logger.log("Webhook info: " + JSON.stringify(result, null, 2));
+  Logger.log("Webhook info: " + JSON.stringify(result, null, 2));
 }
 
 // ============================================
@@ -429,5 +438,5 @@ function getWebhookInfo() {
 function sendTestMessage() {
   const testMessage = `🧪 Test message từ Google Apps Script\nThời gian: ${new Date().toLocaleString('vi-VN')}`;
   sendMessage(CHAT_ID, testMessage);
-  // Logger.log("Test message sent!");
+  Logger.log("Test message sent!");
 }
