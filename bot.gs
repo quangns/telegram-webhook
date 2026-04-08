@@ -8,13 +8,10 @@ var COMMANDS = [
   {cmd: "/start", usage: "/start", desc: "Bắt đầu"},
   {cmd: "/help", usage: "/help", desc: "Xem hướng dẫn"},
   {cmd: "/info", usage: "/info", desc: "Thông tin bot"},
-  {cmd: "/hello", usage: "/hello", desc: "Chào hỏi"},
   {cmd: "/status", usage: "/status", desc: "Kiểm tra trạng thái"},
-  {cmd: "/time", usage: "/time", desc: "Xem giờ hiện tại"},
   {cmd: "/nhacnho", usage: "/nhacnho ...", desc: "Đặt nhắc (ví dụ: /nhacnho 8h sáng ngày mai Gặp khách)"},
   {cmd: "/log", usage: "/log [thu] [mô tả] [số tiền]", desc: "Ghi thu chi cá nhân"},
-  {cmd: "/search", usage: "/search [từ khóa]", desc: "Tổng hợp tin tức tóm tắt"},
-  {cmd: "/echo", usage: "/echo [text]", desc: "Lặp lại text"}
+  {cmd: "/analyze", usage: "/analyze [1w|1m|tháng N]", desc: "Phân tích thu/chi theo danh mục trong khung thời gian (ví dụ: 1w, 1m, tháng 3)"}
 ];
 
 // Function to update bot commands dynamically and sync with Telegram
@@ -174,18 +171,11 @@ Nền tảng: Google Apps Script\n
 Trạng thái: ✅ Hoạt động`;
     sendMessage(chatId, infoText);
   }
-  else if (text === "/hello") {
-    sendMessage(chatId, `👋 Xin chào ${username}! Mình rất vui gặp bạn!`);
-  }
   else if (text === "/status") {
     const status = `✅ Bot Status:\n\nTrạng thái: Hoạt động\nThời gian: ${new Date().toLocaleString('vi-VN')}\nUser ID: ${userId}`;
     sendMessage(chatId, status);
   }
-  else if (text === "/time") {
-    const now = new Date();
-    const timeText = `🕐 Thời gian hiện tại:\n\n${now.toLocaleString('vi-VN')}`;
-    sendMessage(chatId, timeText);
-  }
+  
   else if (text.startsWith("/nhacnho")) {
     // /nhacnho command: delegate to handler
     var args = text.length > 8 ? text.substring(8).trim() : '';
@@ -224,27 +214,52 @@ Trạng thái: ✅ Hoạt động`;
     }
   }
     else if (text.startsWith("/analyze")) {
-      try {
-        createAnalysisSheet();
-        sendMessage(chatId, "✅ Đã tạo/‌cập nhật sheet 'Analysis' và biểu đồ phân tích.");
-      } catch (err) {
-        Logger.log('Error running analyze via Telegram: ' + err.toString());
-        sendMessage(chatId, "❌ Lỗi khi phân tích: " + (err.message || err));
+        try {
+          var parts = text.split(/\s+/);
+          var arg = parts.slice(1).join(' ').trim();
+          var range = null;
+          var now = new Date();
+          if (!arg) {
+            range = null; // full range
+          } else if (/^(\d+)w$/i.test(arg)) {
+            var w = parseInt(arg.match(/^(\d+)w$/i)[1], 10);
+            var from = new Date(now.getTime() - (w * 7 * 24 * 60 * 60 * 1000));
+            range = { from: from, to: now };
+          } else if (/^(\d+)m$/i.test(arg)) {
+            // interpret '1m' as current month from start
+            var m = parseInt(arg.match(/^(\d+)m$/i)[1], 10);
+            if (m === 1) {
+              var from = new Date(now.getFullYear(), now.getMonth(), 1);
+              range = { from: from, to: now };
+            } else {
+              range = null;
+            }
+          } else {
+            // try parse Vietnamese 'tháng N [YYYY]'
+            var mm = arg.match(/th[aá]ng\s*(\d{1,2})(?:\s+(\d{4}))?/i);
+            if (mm) {
+              var month = parseInt(mm[1], 10);
+              var year = mm[2] ? parseInt(mm[2], 10) : now.getFullYear();
+              var from = new Date(year, month - 1, 1);
+              var to = new Date(year, month, 1);
+              to = new Date(to.getTime() - 1); // end of month
+              range = { from: from, to: to };
+            } else {
+              range = null;
+            }
+          }
+
+          createAnalysisSheet(range);
+          var msg = '✅ Đã tạo/‌cập nhật sheet "Analysis" và biểu đồ phân tích.';
+          if (range && range.from) {
+            msg += '\nPhạm vi: ' + (range.from.toLocaleString('vi-VN')) + ' → ' + (range.to ? range.to.toLocaleString('vi-VN') : now.toLocaleString('vi-VN'));
+          }
+          sendMessage(chatId, msg);
+        } catch (err) {
+          Logger.log('Error running analyze via Telegram: ' + err.toString());
+          sendMessage(chatId, "❌ Lỗi khi phân tích: " + (err.message || err));
+        }
       }
-    }
-  else if (text.startsWith("/echo ")) {
-    const echoText = text.substring(6);
-    sendMessage(chatId, `🔊 Echo: ${echoText}`);
-  }
-  else if (text.startsWith("/search ")) {
-    const query = text.substring(8).trim();
-    if (!query) {
-      sendMessage(chatId, "🔍 Vui lòng nhập từ khóa tìm kiếm. Ví dụ: /search giá vàng hôm nay");
-    } else {
-      const result = searchPerplexity(query);
-      sendMessage(chatId, result);
-    }
-  }
   else if (text.startsWith("/")) {
     sendMessage(chatId, "❌ Lệnh không tồn tại! Gõ /help để xem danh sách lệnh.");
   }
@@ -446,47 +461,7 @@ function logFinanceCommand(username, type, description, amount) {
 // ============================================
 // 6.7. TÌM KIẾM TRÊN DUCKDUCKGO (ALTERNATIVE CHO PERPLEXITY)
 // ============================================
-function searchPerplexity(query) {
-  try {
-    // Lấy HTML kết quả DuckDuckGo và parse title/snippet để tổng hợp tin tức.
-    const url = `https://lite.duckduckgo.com/lite?q=${encodeURIComponent(query)}`;
-    const options = {
-      method: 'get',
-      muteHttpExceptions: true,
-      followRedirects: true
-    };
-    const html = UrlFetchApp.fetch(url, options).getContentText();
-
-    const itemRegex = /<a[^>]+class=["']result-link["'][^>]*>([\s\S]*?)<\/a>[\s\S]*?<div[^>]+class=["']result-snippet["'][^>]*>([\s\S]*?)<\/div>/gi;
-    let match;
-    const results = [];
-    while ((match = itemRegex.exec(html)) && results.length < 5) {
-      const title = match[1].replace(/<[^>]+>/g, '').trim();
-      const snippet = match[2].replace(/<[^>]+>/g, '').trim();
-      if (title) {
-        results.push({ title, snippet });
-      }
-    }
-
-    if (results.length > 0) {
-      let output = `📰 Tổng hợp tin tức cho: "${query}"\n\n`;
-      results.forEach((item, index) => {
-        output += `${index + 1}. ${item.title}\n`;
-        if (item.snippet) {
-          output += `${item.snippet}\n`;
-        }
-        output += `\n`;
-      });
-      output += `📌 Đây là phần tóm tắt tin tức, không có link để bạn click.`;
-      return output.trim();
-    }
-
-    return `❌ Không tìm thấy kết quả cho: "${query}"`;
-  } catch (error) {
-    Logger.log("DuckDuckGo HTML fallback error: " + error.toString());
-    return "❌ Lỗi khi tìm kiếm. Vui lòng thử lại sau.";
-  }
-}
+// searchPerplexity removed — /search command no longer supported
 
 // ============================================
 // 7. KEYBOARD (NÚT BẤM)
@@ -738,7 +713,7 @@ function appendTransactionsToFinanceLogs(rows, source) {
   }
 }
 
-function createAnalysisSheet() {
+function createAnalysisSheet(range) {
   try {
     var ss = SpreadsheetApp.openById(SHEET_ID);
     var dataSheet = ss.getSheetByName('FinanceLogs');
@@ -747,42 +722,91 @@ function createAnalysisSheet() {
     if (lastRow < 2) throw new Error('No data to analyze');
     var lastCol = dataSheet.getLastColumn();
     var headers = dataSheet.getRange(1,1,1,lastCol).getValues()[0];
-    var catIdx = -1; var amtIdx = -1;
+
+    // find indices (0-based for arrays, will use .getRange with 1-based)
+    var timeIdx = -1, catIdx = -1, amtIdx = -1;
     for (var i=0;i<headers.length;i++){
       var h = String(headers[i]).toLowerCase();
-      if (h === 'danh mục') catIdx = i+1;
-      if (h.indexOf('số tiền') !== -1 || h.indexOf('so tien') !== -1) amtIdx = i+1;
+      if (h.indexOf('thời gian') !== -1 || h.indexOf('thoi gian') !== -1) timeIdx = i;
+      if (h === 'danh mục' || h.indexOf('danh mục') !== -1 || h.indexOf('danh muc') !== -1) catIdx = i;
+      if (h.indexOf('số tiền') !== -1 || h.indexOf('so tien') !== -1 || h.indexOf('sotien') !== -1) amtIdx = i;
     }
     if (catIdx === -1) throw new Error("Header 'Danh mục' not found");
     if (amtIdx === -1) throw new Error("Header 'Số tiền (VND)' not found");
 
-    var vals = dataSheet.getRange(2, catIdx, lastRow-1, 1).getValues();
-    var amts = dataSheet.getRange(2, amtIdx, lastRow-1, 1).getValues();
+    var rows = dataSheet.getRange(2,1,lastRow-1,lastCol).getValues();
     var sums = {};
-    for (var r=0;r<vals.length;r++){
-      var c = String(vals[r][0]||'khác');
-      var a = parseFloat(amts[r][0]) || 0;
-      sums[c] = (sums[c]||0) + a;
+    for (var r=0;r<rows.length;r++){
+      var row = rows[r];
+      var rowDate = null;
+      if (timeIdx !== -1) {
+        var tv = row[timeIdx];
+        if (tv instanceof Date) rowDate = tv;
+        else if (tv) {
+          var parsed = Date.parse(String(tv));
+          if (!isNaN(parsed)) rowDate = new Date(parsed);
+        }
+      }
+
+      // if range provided, skip rows without valid date or outside range
+      if (range && range.from) {
+        if (!rowDate) continue;
+        if (range.to) {
+          if (rowDate.getTime() < range.from.getTime() || rowDate.getTime() > range.to.getTime()) continue;
+        } else {
+          if (rowDate.getTime() < range.from.getTime()) continue;
+        }
+      }
+
+      var cat = String(row[catIdx] || 'khác');
+      var amtRaw = row[amtIdx];
+      var amt = Number(amtRaw);
+      if (isNaN(amt)) {
+        amt = parseAmountString(amtRaw) || 0;
+      }
+      sums[cat] = (sums[cat] || 0) + (amt || 0);
     }
 
     var analysis = ss.getSheetByName('Analysis');
     if (!analysis) analysis = ss.insertSheet('Analysis');
     analysis.clear();
-    var out = [['Danh mục','Tổng']];
-    for (var k in sums) out.push([k, sums[k]]);
-    analysis.getRange(1,1,out.length,out[0].length).setValues(out);
 
-    // Create pie chart
-    try {
-      var chart = analysis.newChart()
-        .addRange(analysis.getRange(1,1,out.length,2))
-        .setChartType(Charts.ChartType.PIE)
-        .setPosition(1,4,0,0)
-        .build();
-      analysis.insertChart(chart);
-    } catch (e) {
-      Logger.log('Chart creation failed: ' + e.toString());
+    var out = [['Danh mục','Tổng']];
+    for (var k in sums) {
+      out.push([k, sums[k]]);
     }
+
+    if (out.length === 1) {
+      analysis.getRange(1,1,1,1).setValue('Không có dữ liệu phù hợp với phạm vi đã chọn.');
+      return true;
+    }
+
+    analysis.getRange(1,1,out.length,out[0].length).setValues(out);
+    try { analysis.getRange(2,2,out.length-1,1).setNumberFormat('#,##0'); } catch(e){}
+
+    var noteText = 'Ghi chú: Báo cáo tổng hợp số tiền theo "Danh mục" lấy từ sheet "FinanceLogs". Thời gian tạo: ' + new Date().toLocaleString('vi-VN');
+    if (range && range.from) {
+      noteText += '\nPhạm vi: ' + range.from.toLocaleString('vi-VN') + (range.to ? (' → ' + range.to.toLocaleString('vi-VN')) : ' → hiện tại');
+    }
+    analysis.getRange(1,4).setValue(noteText);
+    try { analysis.setColumnWidth(4, 420); } catch(e){}
+
+    try {
+      var dataRowCount = out.length - 1;
+      if (dataRowCount > 0) {
+        var dataRange = analysis.getRange(2,1,dataRowCount,2);
+        var chart = analysis.newChart()
+          .setChartType(Charts.ChartType.PIE)
+          .addRange(dataRange)
+          .setPosition(2,4,0,0)
+          .setOption('title', 'Phân bố thu/chi theo danh mục')
+          .setOption('pieSliceText', 'percentage')
+          .setOption('legend', 'right')
+          .build();
+        analysis.insertChart(chart);
+      }
+    } catch(e) { Logger.log('Chart creation failed: ' + e.toString()); }
+
     return true;
   } catch (err) {
     Logger.log('createAnalysisSheet error: ' + err.toString());
