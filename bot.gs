@@ -2,6 +2,22 @@
 // TELEGRAM BOT WEBHOOK - GOOGLE APPS SCRIPT
 // ============================================
 
+// Commands metadata: update this when adding commands.
+// Use `tools/add_command.js` to safely add commands and sync docs.
+var COMMANDS = [
+  {cmd: "/start", usage: "/start", desc: "Bắt đầu"},
+  {cmd: "/help", usage: "/help", desc: "Xem hướng dẫn"},
+  {cmd: "/info", usage: "/info", desc: "Thông tin bot"},
+  {cmd: "/hello", usage: "/hello", desc: "Chào hỏi"},
+  {cmd: "/status", usage: "/status", desc: "Kiểm tra trạng thái"},
+  {cmd: "/time", usage: "/time", desc: "Xem giờ hiện tại"},
+  {cmd: "/nhacnho", usage: "/nhacnho ...", desc: "Đặt nhắc (ví dụ: /nhacnho 8h sáng ngày mai Gặp khách)"},
+  {cmd: "/log", usage: "/log [thu] [mô tả] [số tiền]", desc: "Ghi thu chi cá nhân"},
+  {cmd: "/search", usage: "/search [từ khóa]", desc: "Tổng hợp tin tức tóm tắt"},
+  {cmd: "/echo", usage: "/echo [text]", desc: "Lặp lại text"}
+];
+
+
 // Cấu hình được tách ra trong config.gs
 
 // ============================================
@@ -32,9 +48,9 @@ function doPost(e) {
     }
 
     // Xử lý webhook từ Telegram
-    if (payload.message) {
-      handleTelegramMessage(payload.message);
-    } else if (payload.callback_query) {
+      if (payload.message) {
+        handleTelegramMessage(payload.message);
+      } else if (payload.callback_query) {
       handleCallbackQuery(payload.callback_query);
     }
   } catch (error) {
@@ -52,6 +68,12 @@ function handleTelegramMessage(message) {
   let text = String(message.text || "");
   const messageId = message.message_id;
 
+  // If message contains a document (file) -> handle import
+  if (message.document) {
+    handleDocumentMessage(message);
+    return;
+  }
+
   // Loại bỏ tên bot khỏi câu lệnh (ví dụ: /log@BOT_NAME -> /log)
   if (typeof BOT_NAME !== 'undefined' && BOT_NAME) {
     if (text.startsWith("/") && text.includes(BOT_NAME)) {
@@ -66,17 +88,18 @@ function handleTelegramMessage(message) {
     sendMessage(chatId, "👋 Xin chào! Tôi là bot Google Apps Script.\n\nCác lệnh có sẵn:\n/help - Xem danh sách lệnh\n/info - Thông tin\n/hello - Chào", getMainKeyboard());
   }
   else if (text.startsWith("/help")) {
-    const helpText = `📖 Danh sách lệnh:\n\n
-/start - Bắt đầu\n
-/help - Xem hướng dẫn\n
-/info - Thông tin bot\n
-/hello - Chào hỏi\n
-/status - Kiểm tra trạng thái\n
-/time - Xem giờ hiện tại\n
-/log [thu] [mô tả] [số tiền] - Ghi thu chi cá nhân (mặc định chi, lương/thưởng mặc định thu, hỗ trợ k/tr)\n
-/search [từ khóa] - Tổng hợp tin tức tóm tắt, chỉ hiển thị nội dung\n
-/echo [text] - Lặp lại text`;
-    sendMessage(chatId, helpText);
+    // Build help text from COMMANDS metadata
+    try {
+      var lines = ['📖 Danh sách lệnh:', ''];
+      for (var i = 0; i < COMMANDS.length; i++) {
+        var c = COMMANDS[i];
+        lines.push((c.usage || c.cmd) + ' - ' + (c.desc || ''));
+      }
+      sendMessage(chatId, lines.join('\n'));
+    } catch (e) {
+      // fallback to static text
+      sendMessage(chatId, "📖 /start /help /info /hello /status /time /nhacnho /log /search /echo");
+    }
   }
   else if (text.startsWith("/info")) {
     const infoText = `ℹ️ Thông tin Bot:\n\n
@@ -97,6 +120,11 @@ Trạng thái: ✅ Hoạt động`;
     const now = new Date();
     const timeText = `🕐 Thời gian hiện tại:\n\n${now.toLocaleString('vi-VN')}`;
     sendMessage(chatId, timeText);
+  }
+  else if (text.startsWith("/nhacnho")) {
+    // /nhacnho command: delegate to handler
+    var args = text.length > 8 ? text.substring(8).trim() : '';
+    handleNhacNhoCommand(chatId, userId, args);
   }
   else if (text.startsWith("/log ")) {
     const parts = text.substring(5).trim().split(' ');
@@ -130,6 +158,15 @@ Trạng thái: ✅ Hoạt động`;
       }
     }
   }
+    else if (text.startsWith("/analyze")) {
+      try {
+        createAnalysisSheet();
+        sendMessage(chatId, "✅ Đã tạo/‌cập nhật sheet 'Analysis' và biểu đồ phân tích.");
+      } catch (err) {
+        Logger.log('Error running analyze via Telegram: ' + err.toString());
+        sendMessage(chatId, "❌ Lỗi khi phân tích: " + (err.message || err));
+      }
+    }
   else if (text.startsWith("/echo ")) {
     const echoText = text.substring(6);
     sendMessage(chatId, `🔊 Echo: ${echoText}`);
@@ -464,6 +501,216 @@ function sendTestMessage() {
 }
 
 // ============================================
+// IMPORT FILES (PDF / XLSX) + ANALYSIS
+// ============================================
+
+function handleDocumentMessage(message) {
+  try {
+    var chatId = message.chat.id;
+    var doc = message.document;
+    var fileId = doc.file_id;
+    var fileName = doc.file_name || ('file_' + new Date().getTime());
+    // Get file path from Telegram
+    var resp = UrlFetchApp.fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+    var data = JSON.parse(resp.getContentText());
+    if (!data.ok) {
+      sendMessage(chatId, "❌ Không tải được file từ Telegram.");
+      return;
+    }
+    var filePath = data.result.file_path;
+    var fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+    var blob = UrlFetchApp.fetch(fileUrl).getBlob();
+    blob.setName(fileName);
+
+    // Decide by extension
+    var lower = fileName.toLowerCase();
+    if (lower.endsWith('.xlsx') || lower.endsWith('.xls') || doc.mime_type && doc.mime_type.indexOf('spreadsheet') !== -1) {
+      var added = importXlsxBlobToFinanceLogs(blob, fileName);
+      sendMessage(chatId, "✅ Đã import " + added + " giao dịch từ file spreadsheet.");
+    } else if (lower.endsWith('.pdf') || doc.mime_type && doc.mime_type.indexOf('pdf') !== -1) {
+      var added2 = importPdfBlobToFinanceLogs(blob, fileName);
+      sendMessage(chatId, "✅ Đã import ~" + added2 + " giao dịch từ file PDF (kết quả ước lượng).");
+    } else {
+      sendMessage(chatId, "❌ Định dạng file không được hỗ trợ. Vui lòng gửi .xlsx hoặc .pdf");
+    }
+  } catch (err) {
+    Logger.log('handleDocumentMessage error: ' + err.toString());
+  }
+}
+
+function importXlsxBlobToFinanceLogs(blob, filename) {
+  try {
+    // Try converting via Drive API (Advanced Drive service) if available
+    var file;
+    var ss;
+    try {
+      var resource = { title: filename };
+      file = Drive.Files.insert(resource, blob, { convert: true });
+      ss = SpreadsheetApp.openById(file.id);
+    } catch (e) {
+      // fallback: create file in Drive and try to open
+      var f = DriveApp.createFile(blob);
+      try { ss = SpreadsheetApp.openById(f.getId()); } catch (e2) { throw e; }
+    }
+
+    var sheet0 = ss.getSheets()[0];
+    var data = sheet0.getDataRange().getValues();
+    // Heuristic: find description and amount columns
+    var header = data[0].map(function(h){ return String(h).toLowerCase(); });
+    var descIdx = header.indexOf('description');
+    if (descIdx === -1) descIdx = header.indexOf('mô tả');
+    var amtIdx = header.indexOf('amount');
+    if (amtIdx === -1) amtIdx = header.indexOf('số tiền (vnd)');
+    var rows = [];
+    for (var i = 1; i < data.length; i++) {
+      var desc = (descIdx >=0) ? data[i][descIdx] : data[i][0];
+      var amt = (amtIdx >=0) ? data[i][amtIdx] : '';
+      rows.push({description: desc, amount: String(amt)});
+    }
+    return appendTransactionsToFinanceLogs(rows, 'import');
+  } catch (err) {
+    Logger.log('importXlsxBlobToFinanceLogs error: ' + err.toString());
+    return 0;
+  }
+}
+
+function importPdfBlobToFinanceLogs(blob, filename) {
+  try {
+    // Try to convert PDF -> Google Doc using Drive API (convert:true)
+    var docFile;
+    var text = '';
+    try {
+      var resource = { title: filename, mimeType: MimeType.GOOGLE_DOCS };
+      docFile = Drive.Files.insert(resource, blob, { convert: true });
+      var doc = DocumentApp.openById(docFile.id);
+      text = doc.getBody().getText();
+    } catch (e) {
+      // fallback: try saving pdf and use OCR/third-party - here we just extract raw text if possible
+      var saved = DriveApp.createFile(blob);
+      Logger.log('PDF conversion failed; saved to Drive id=' + saved.getId());
+      text = '';
+    }
+
+    if (!text) {
+      return 0;
+    }
+
+    var txs = parseBankStatementText(text);
+    return appendTransactionsToFinanceLogs(txs, 'pdf-import');
+  } catch (err) {
+    Logger.log('importPdfBlobToFinanceLogs error: ' + err.toString());
+    return 0;
+  }
+}
+
+function parseBankStatementText(text) {
+  var lines = text.split(/\r?\n/);
+  var txs = [];
+  for (var i=0;i<lines.length;i++){
+    var l = lines[i].trim();
+    if (!l) continue;
+    // find amount-like token
+    var m = l.match(/([\d\.,]+\s*(k|m|tr|vnd)?)/i);
+    if (m) {
+      var amtRaw = m[0];
+      var desc = l.replace(m[0],'').trim();
+      if (desc.length > 200) desc = desc.slice(0,200);
+      txs.push({description: desc || 'auto-import', amount: amtRaw});
+    }
+  }
+  return txs;
+}
+
+function appendTransactionsToFinanceLogs(rows, source) {
+  try {
+    if (!rows || rows.length===0) return 0;
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = ss.getSheetByName('FinanceLogs');
+    if (!sheet) {
+      sheet = ss.insertSheet('FinanceLogs');
+      sheet.appendRow(['Thời gian','Username','Loại','Danh mục','Mô tả','Số tiền (VND)']);
+    }
+    var lastCol = sheet.getLastColumn();
+    var headers = sheet.getRange(1,1,1,lastCol).getValues()[0];
+    var out = [];
+    for (var i=0;i<rows.length;i++){
+      var desc = rows[i].description;
+      var amt = parseAmountString(rows[i].amount);
+      var cat = classifyDescription(desc);
+      var row = [];
+      for (var c=0;c<headers.length;c++){
+        var h = headers[c];
+        if (h === 'Thời gian') row.push(new Date().toLocaleString('vi-VN'));
+        else if (h === 'Username') row.push(source);
+        else if (String(h).toLowerCase().indexOf('loại')!==-1) row.push('Chi');
+        else if (String(h).toLowerCase().indexOf('danh mục')!==-1) row.push(cat);
+        else if (String(h).toLowerCase().indexOf('mô tả')!==-1 || String(h).toLowerCase().indexOf('mota')!==-1) row.push(desc);
+        else if (String(h).toLowerCase().indexOf('số tiền')!==-1 || String(h).toLowerCase().indexOf('so tien')!==-1) row.push(amt);
+        else row.push('');
+      }
+      out.push(row);
+    }
+    sheet.getRange(sheet.getLastRow()+1,1,out.length,out[0].length).setValues(out);
+    return out.length;
+  } catch (err) {
+    Logger.log('appendTransactionsToFinanceLogs error: ' + err.toString());
+    return 0;
+  }
+}
+
+function createAnalysisSheet() {
+  try {
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var dataSheet = ss.getSheetByName('FinanceLogs');
+    if (!dataSheet) throw new Error("Sheet 'FinanceLogs' not found");
+    var lastRow = dataSheet.getLastRow();
+    if (lastRow < 2) throw new Error('No data to analyze');
+    var lastCol = dataSheet.getLastColumn();
+    var headers = dataSheet.getRange(1,1,1,lastCol).getValues()[0];
+    var catIdx = -1; var amtIdx = -1;
+    for (var i=0;i<headers.length;i++){
+      var h = String(headers[i]).toLowerCase();
+      if (h === 'danh mục') catIdx = i+1;
+      if (h.indexOf('số tiền') !== -1 || h.indexOf('so tien') !== -1) amtIdx = i+1;
+    }
+    if (catIdx === -1) throw new Error("Header 'Danh mục' not found");
+    if (amtIdx === -1) throw new Error("Header 'Số tiền (VND)' not found");
+
+    var vals = dataSheet.getRange(2, catIdx, lastRow-1, 1).getValues();
+    var amts = dataSheet.getRange(2, amtIdx, lastRow-1, 1).getValues();
+    var sums = {};
+    for (var r=0;r<vals.length;r++){
+      var c = String(vals[r][0]||'khác');
+      var a = parseFloat(amts[r][0]) || 0;
+      sums[c] = (sums[c]||0) + a;
+    }
+
+    var analysis = ss.getSheetByName('Analysis');
+    if (!analysis) analysis = ss.insertSheet('Analysis');
+    analysis.clear();
+    var out = [['Danh mục','Tổng']];
+    for (var k in sums) out.push([k, sums[k]]);
+    analysis.getRange(1,1,out.length,out[0].length).setValues(out);
+
+    // Create pie chart
+    try {
+      var chart = analysis.newChart()
+        .addRange(analysis.getRange(1,1,out.length,2))
+        .setChartType(Charts.ChartType.PIE)
+        .setPosition(1,4,0,0)
+        .build();
+      analysis.insertChart(chart);
+    } catch (e) {
+      Logger.log('Chart creation failed: ' + e.toString());
+    }
+    return true;
+  } catch (err) {
+    Logger.log('createAnalysisSheet error: ' + err.toString());
+    throw err;
+  }
+}
+
+// ============================================
 // PHẦN BỔ SUNG: PHÂN LOẠI MÔ TẢ GIAO DỊCH
 // Không xóa hoặc thay thế phần nào trong file, chỉ bổ sung thêm code
 // ============================================
@@ -476,6 +723,7 @@ var CATEGORY_PATTERNS = {
   "xăng xe": ["gửi xe","xăng","đổ xăng","bơm xăng","nhien lieu","nhiên liệu","petrol","diesel","gas","xăng xe","đổ","rút xăng","thuê xe","xe ôm","grab","taxi","xe máy","xe tải"],
   "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet"],
   "được cho": ["được"],
+  "thư giãn": ["du lịch","du lich","tham quan","vui chơi","khách sạn","khach san","resort","spa","công viên","cong vien","tour","bảo tàng","bao tang"],
   "quan hệ": ["mừng","đám","hiếu","hỉ","gửi","mừng cưới","đám cưới","đám hỏi","đám tang"]
 };
 
@@ -554,6 +802,20 @@ function classifyDescription(text) {
   s = s.replace(/[.,;:!"'()\[\]\/\\-]/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
 
+  // Special-case: xử lý các chuỗi chứa "vé <x>"
+  if (s.indexOf('vé ') !== -1 || s.indexOf('ve ') !== -1) {
+    var transportKeywords = ['xe', 'tàu', 'tau', 'bus', 'máy bay', 'may bay', 'taxi', 'ô tô', 'oto', 'ôtô', 'xe máy', 'xe ôm', 'xeom', 'grab', 'vé xe', 'vé tàu', 'vé máy bay', 'vé taxi'];
+    var leisureKeywords = ['tham quan', 'du lịch', 'du lich', 'vui chơi', 'công viên', 'cong vien', 'tour', 'bảo tàng', 'bao tang', 'khách sạn', 'khach san', 'resort', 'vé tham quan', 'vé du lịch'];
+
+    for (var ti = 0; ti < transportKeywords.length; ti++) {
+      if (s.indexOf(transportKeywords[ti]) !== -1) return 'xăng xe';
+    }
+    for (var li = 0; li < leisureKeywords.length; li++) {
+      if (s.indexOf(leisureKeywords[li]) !== -1) return 'thư giãn';
+    }
+  }
+
+  // Fall back to general keyword lists
   for (var cat in CATEGORY_PATTERNS) {
     var patterns = CATEGORY_PATTERNS[cat];
     for (var i = 0; i < patterns.length; i++) {
@@ -627,6 +889,192 @@ function reclassifyFinanceLogs() {
     Logger.log('reclassifyFinanceLogs error: ' + err.toString());
   }
 }
+
+// ============================================
+// Reminders: `/nhacnho` command + scheduler
+// ============================================
+
+/**
+ * Handle /nhacnho command from Telegram.
+ * Supported formats:
+ * /nhacnho YYYY-MM-DD HH:MM message
+ * /nhacnho YYYY-MM-DDTHH:MM message
+ * /nhacnho HH:MM message (today at that time)
+ * /nhacnho in 10m message  (relative minutes)
+ * /nhacnho in 2h message   (relative hours)
+ */
+function handleNhacNhoCommand(chatId, userId, argsText) {
+  try {
+    var rest = (argsText || '').toString().trim();
+    if (!rest) {
+      sendMessage(chatId, '❌ Cách dùng: /nhacnho 2026-04-08 15:30 Nộp báo cáo\nHoặc: /nhacnho 15:30 Gọi điện');
+      return;
+    }
+
+    var whenDate = null;
+    var messageText = '';
+
+    // 1) Vietnamese short form: "8h sáng ngày mai ..." or "8:30 chiều mai ..."
+    var m = rest.match(/^([0-9]{1,2})(?::([0-9]{2}))?\s*h?\s*(sáng|chiều|tối|sang|chieu|toi)?\s*(ngày mai|mai)?\s+([\s\S]+)$/i);
+    if (m) {
+      var hour = parseInt(m[1], 10);
+      var minute = m[2] ? parseInt(m[2], 10) : 0;
+      var period = (m[3] || '').toLowerCase();
+      var dayToken = (m[4] || '').toLowerCase();
+      messageText = (m[5] || '').trim();
+
+      var base = new Date();
+      if (dayToken === 'ngày mai' || dayToken === 'mai') base.setDate(base.getDate() + 1);
+      if (period === 'chiều' || period === 'chieu' || period === 'tối' || period === 'toi') {
+        if (hour < 12) hour += 12;
+      }
+      if ((period === 'sáng' || period === 'sang') && hour === 12) hour = 0;
+      whenDate = new Date(base.getFullYear(), base.getMonth(), base.getDate(), hour, minute, 0);
+    }
+
+    // 2) Absolute datetime: YYYY-MM-DD HH:MM
+    if (!whenDate) {
+      m = rest.match(/^([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2})\s+([\s\S]+)$/);
+      if (m) {
+        whenDate = parseIsoLikeDate(m[1]);
+        messageText = (m[2] || '').trim();
+      }
+    }
+
+    // 3) Time only today: HH:MM message
+    if (!whenDate) {
+      m = rest.match(/^([0-9]{2}:[0-9]{2})\s+([\s\S]+)$/);
+      if (m) {
+        whenDate = parseTimeToday(m[1]);
+        messageText = (m[2] || '').trim();
+      }
+    }
+
+    // 4) Relative: in 10m message or in 2h message
+    if (!whenDate) {
+      m = rest.match(/^in\s+([0-9]+)(m|h)\s+([\s\S]+)$/i);
+      if (m) {
+        var val = parseInt(m[1], 10);
+        var unit = m[2].toLowerCase();
+        whenDate = new Date();
+        if (unit === 'm') whenDate.setMinutes(whenDate.getMinutes() + val);
+        else whenDate.setHours(whenDate.getHours() + val);
+        messageText = (m[3] || '').trim();
+      }
+    }
+
+    if (!whenDate || isNaN(whenDate.getTime())) {
+      sendMessage(chatId, '❌ Không nhận dạng được thời gian. Dùng: /nhacnho YYYY-MM-DD HH:MM lời_nhắc\nHoặc: /nhacnho 15:30 Gọi điện\nHoặc: /nhacnho in 10m Xong việc');
+      return;
+    }
+
+    var now = new Date();
+    if (whenDate.getTime() <= now.getTime()) {
+      sendMessage(chatId, '❌ Thời gian đã qua. Vui lòng đặt thời gian trong tương lai.');
+      return;
+    }
+
+    scheduleReminder(chatId, userId, whenDate, messageText);
+    sendMessage(chatId, '✅ Đã đặt nhắc: ' + whenDate.toLocaleString('vi-VN') + ' -> ' + messageText);
+  } catch (err) {
+    Logger.log('handleNhacNhoCommand error: ' + err.toString());
+    try { sendMessage(chatId, '❌ Lỗi khi đặt nhắc. Vui lòng thử lại.'); } catch (e) {}
+  }
+}
+
+function parseIsoLikeDate(s) {
+  // Accept YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM
+  s = s.replace('T', ' ');
+  return new Date(s);
+}
+
+function parseTimeToday(hm) {
+  var now = new Date();
+  var parts = hm.split(':');
+  var d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parseInt(parts[0],10), parseInt(parts[1],10), 0);
+  return d;
+}
+
+function scheduleReminder(chatId, userId, whenDate, messageText) {
+  try {
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = ss.getSheetByName('Reminders');
+    var headers = ['ChatId','UserId','WhenUtc','WhenLocal','Message','Sent','CreatedAt','SentAt'];
+    if (!sheet) {
+      sheet = ss.insertSheet('Reminders');
+      sheet.appendRow(headers);
+    }
+
+    // Ensure headers exist
+    var lastCol = sheet.getLastColumn();
+    if (lastCol === 0) {
+      sheet.appendRow(headers);
+      lastCol = sheet.getLastColumn();
+    }
+
+    var now = new Date();
+    var row = [String(chatId), String(userId), whenDate.toISOString(), whenDate.toLocaleString('vi-VN'), messageText, '', now.toISOString(), ''];
+    sheet.appendRow(row);
+
+    // Ensure scheduler trigger exists
+    createReminderTriggerIfNotExists();
+  } catch (err) {
+    Logger.log('scheduleReminder error: ' + err.toString());
+  }
+}
+
+function createReminderTriggerIfNotExists() {
+  try {
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i=0;i<triggers.length;i++) {
+      if (triggers[i].getHandlerFunction && triggers[i].getHandlerFunction() === 'checkReminders') return;
+    }
+    // create a minute-based trigger
+    ScriptApp.newTrigger('checkReminders').timeBased().everyMinutes(1).create();
+    Logger.log('Created trigger for checkReminders()');
+  } catch (err) {
+    Logger.log('createReminderTriggerIfNotExists error: ' + err.toString());
+  }
+}
+
+/**
+ * Run by time-driven trigger (every minute). Finds due reminders and sends messages.
+ */
+function checkReminders() {
+  try {
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = ss.getSheetByName('Reminders');
+    if (!sheet) return;
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    var data = sheet.getRange(2,1,lastRow-1,sheet.getLastColumn()).getValues();
+    var updates = [];
+    var now = new Date();
+    for (var i=0;i<data.length;i++) {
+      var row = data[i];
+      var chatId = row[0];
+      var sent = row[5];
+      var whenUtc = row[2];
+      if (sent && String(sent).toLowerCase() === 'true') continue;
+      var whenDate = new Date(whenUtc);
+      if (isNaN(whenDate.getTime())) continue;
+      if (whenDate.getTime() <= now.getTime()) {
+        var messageText = row[4] || '🔔 Nhắc nhở của bạn!';
+        try {
+          sendMessage(chatId, `🔔 Nhắc: ${messageText}`);
+          // mark sent
+          sheet.getRange(i+2, 6).setValue('TRUE');
+          sheet.getRange(i+2, 8).setValue(new Date().toISOString());
+        } catch (sendErr) {
+          Logger.log('Error sending reminder to ' + chatId + ': ' + sendErr.toString());
+        }
+      }
+    }
+  } catch (err) {
+    Logger.log('checkReminders error: ' + err.toString());
+  }
+}
+
 
 /**
  * Tùy chọn: thêm menu vào spreadsheet (chỉ hoạt động nếu script gắn vào spreadsheet)

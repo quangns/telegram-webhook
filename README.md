@@ -91,6 +91,15 @@ curl -X POST https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook \
 
 ---
 
+  ## ⚙️ Lưu ý về lệnh, nhắc và đồng bộ tài liệu
+
+  - **Danh sách lệnh động:** `bot.gs` chứa mảng `COMMANDS` — bot sẽ sinh nội dung `/help` từ đó. Khi thêm lệnh mới, hãy cập nhật `COMMANDS` để `/help` luôn đồng bộ.
+  - **Lệnh nhắc (reminder):** Bot hỗ trợ `/nhacnho` để đặt nhắc. Ví dụ: `/nhacnho 2026-04-08 15:30 Nộp báo cáo` hoặc `/nhacnho 8h sáng ngày mai Gặp khách` hoặc `/nhacnho in 10m Uống thuốc`.
+  - **Lưu nhắc:** Nhắc được lưu trong sheet `Reminders` (nếu chưa có, script sẽ tạo). Đảm bảo `SHEET_ID` trong `config.gs` trỏ tới Google Sheet đúng.
+  - **Triggers & Quyền:** Nhắc theo lịch cần trigger time-driven; script sẽ tạo trigger `checkReminders()` nếu cần, nhưng bạn vẫn phải cấp quyền cho `ScriptApp`, `SpreadsheetApp`, `UrlFetchApp` khi deploy.
+  - **Đồng bộ tài liệu:** Khuyến nghị dùng một script helper (ví dụ `tools/add_command.js` hoặc `tools/sync_help.js`) để thêm entry vào `COMMANDS` và chèn mô tả tương ứng vào `my_skills/gas-bot-pro/SKILL.md` giữa marker `<!-- COMMANDS:START -->` / `<!-- COMMANDS:END -->`.
+  - **Quy tắc file mã:** Mọi file mã hỗ trợ Apps Script phải có phần mở rộng `.gs` và đặt cùng cấp với `bot.gs` và `config.gs` trong repo. Không thêm `.js`/`.ts` cho phần chạy trong Apps Script.
+
 ## 📤 Bước 7: Gửi Tin Nhắn từ Script
 
 ```javascript

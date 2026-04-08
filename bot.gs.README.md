@@ -27,6 +27,13 @@ const WEBHOOK_SECRET = "your_secret_key_123"; // Secret key bất kỳ
 const SHEET_ID = "YOUR_SPREADSHEET_ID"; // Google Sheet ID để lưu lệnh /eat
 ```
 
+## 🔎 Lưu ý khi thêm lệnh mới và tài liệu
+
+- **COMMANDS array:** Thêm metadata lệnh vào `COMMANDS` trong `bot.gs`. `handleTelegramMessage` / `/help` sử dụng `COMMANDS` để hiển thị trợ giúp.
+- **Cập nhật tài liệu:** Khi thêm lệnh mới, hãy bổ sung mô tả vào `my_skills/gas-bot-pro/SKILL.md`. Để tiện, có thể dùng `tools/add_command.js` để đồng bộ tự động giữa mã và tài liệu.
+- **Nhắc (reminder):** Bot có lệnh `/nhacnho` để lập lịch nhắc; nhắc được lưu trong sheet `Reminders` (script tạo sheet nếu cần) và cần trigger/time-driven permissions.
+- **File mã:** Tạo file mã mới ở dạng `.gs` và đặt cùng cấp với `bot.gs`.
+
 ## 🧪 Test bot:
 
 Sau khi deploy, gửi các lệnh cho bot:

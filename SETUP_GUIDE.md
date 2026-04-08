@@ -8,6 +8,7 @@ telegram-webhook/
 ├── advanced-features.js   # Tính năng nâng cao
 ├── payments-admin.js      # Thanh toán & admin functions
 ├── README.md              # Hướng dẫn chính
+---
 └── SETUP_GUIDE.md         # Bắt đầu nhanh
 ```
 
@@ -106,7 +107,17 @@ function getWebhookInfo() {
 ```
 
 **Output mong đợi:**
+```
 ```json
+## 📌 Lưu ý về lệnh, nhắc và tài liệu
+
+- **COMMANDS metadata:** Đặt tất cả command definitions vào mảng `COMMANDS` trong `bot.gs`. `/help` trong bot sẽ đọc mảng này để hiển thị trợ giúp động.
+- **Thêm lệnh mới:** Khi thêm lệnh mới vào `bot.gs`, hãy cập nhật `COMMANDS` và bổ sung mô tả trong `my_skills/gas-bot-pro/SKILL.md` để tài liệu luôn khớp với mã.
+- **Tự động hoá tài liệu:** Có thể viết `tools/add_command.js` hoặc `tools/sync_help.js` để chèn/mở rộng phần lệnh trong các `.md` giữa marker `<!-- COMMANDS:START -->` / `<!-- COMMANDS:END -->`.
+- **Nhắc (reminder):** `/nhacnho` lưu vào sheet `Reminders`; script có logic tạo sheet nếu cần. Đảm bảo `SHEET_ID` hợp lệ và script có quyền `SpreadsheetApp`.
+- **Trigger creation:** `createReminderTriggerIfNotExists()` trong `bot.gs` tạo trigger minute-based cho `checkReminders()`; deploy và cấp quyền để trigger hoạt động.
+- **File mã:** Các file chạy trong Apps Script phải là `.gs` và cùng cấp với `bot.gs`.
+
 {
   "ok": true,
   "result": {
