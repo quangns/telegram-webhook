@@ -17,6 +17,71 @@ var COMMANDS = [
   {cmd: "/echo", usage: "/echo [text]", desc: "Lặp lại text"}
 ];
 
+// Function to update bot commands dynamically and sync with Telegram
+function updateBotCommand(command, description) {
+  if (!Array.isArray(COMMANDS)) {
+    throw new Error('COMMANDS array is not defined.');
+  }
+
+  // update local list
+  const existingCommand = COMMANDS.find(cmd => cmd.cmd === command);
+  if (existingCommand) {
+    existingCommand.desc = description;
+  } else {
+    COMMANDS.push({ cmd: command, usage: command, desc: description });
+  }
+
+  // If no BOT_TOKEN configured, only update local list
+  if (typeof BOT_TOKEN === 'undefined' || !BOT_TOKEN) return;
+
+  // Normalize command name to Telegram requirements (no leading '/', lowercase, letters/numbers/underscore)
+  function normalizeCmdName(s) {
+    if (!s) return '';
+    s = String(s).trim();
+    if (s.startsWith('/')) s = s.substring(1);
+    s = s.toLowerCase();
+    // replace spaces with underscores and remove invalid chars
+    s = s.replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+    return s.substring(0, 32);
+  }
+
+  const commandsForApi = COMMANDS.map(function(c) {
+    // Use `COMMANDS.cmd` for command name and include description from `desc` or `usage`
+    var name = normalizeCmdName(c.cmd || c.usage || '');
+    var desc = String(c.desc || c.usage || name || '').substring(0, 256);
+    return {
+      command: name,
+      description: desc
+    };
+  }).filter(function(x) { return x.command && x.description; });
+
+  if (commandsForApi.length === 0) return;
+
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`;
+  const payload = { commands: commandsForApi };
+
+  try {
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    const text = response.getContentText();
+    let result;
+    try { result = JSON.parse(text); } catch (e) { result = { ok: false, description: 'Invalid JSON response', raw: text }; }
+    if (!result.ok) {
+      Logger.log('setMyCommands payload: ' + JSON.stringify(payload));
+      Logger.log('setMyCommands response: ' + text);
+      throw new Error('Telegram API error: ' + (result.description || JSON.stringify(result)));
+    }
+    Logger.log('Telegram commands synced successfully');
+  } catch (err) {
+    Logger.log('Failed to sync commands: ' + err.toString());
+  }
+}
+
+// (syncTelegramCommands removed — handled inside updateBotCommand)
 
 // Cấu hình được tách ra trong config.gs
 
@@ -458,6 +523,21 @@ function setupWebhook() {
   var url = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=` + WEBAPPURL + '&drop_pending_updates=true';
   var response = UrlFetchApp.fetch(url);
   Logger.log("Setup webhook response: " + response.getContentText());
+  try {
+    // Register commands after webhook setup
+    if (Array.isArray(COMMANDS) && COMMANDS.length > 0) {
+      for (var i = 0; i < COMMANDS.length; i++) {
+        try {
+          var c = COMMANDS[i];
+          updateBotCommand(c.cmd || c.usage, c.desc || c.usage || '');
+        } catch (e) {
+          Logger.log('updateBotCommand error for ' + JSON.stringify(COMMANDS[i]) + ': ' + e.toString());
+        }
+      }
+    }
+  } catch (err) {
+    Logger.log('Error registering commands after webhook setup: ' + err.toString());
+  }
 }
 
 // ============================================

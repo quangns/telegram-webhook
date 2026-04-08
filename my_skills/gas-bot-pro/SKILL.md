@@ -91,6 +91,7 @@ Các câu hỏi cần làm rõ (để hoàn thiện skill)
 Quy tắc khi thêm lệnh mới (Automation & Conventions)
 - **Mục tiêu:** Khi phát triển và thêm lệnh mới vào `bot.gs`, ta tự động duy trì đồng bộ giữa phần trợ giúp `/help` trong bot và tài liệu hướng dẫn (`.md`).
 - **Cập nhật `/help`:** Mỗi lệnh mới phải được thêm vào mảng `COMMANDS` trong [telegram-webhook/bot.gs](telegram-webhook/bot.gs). Hệ thống `/help` sẽ đọc `COMMANDS` để sinh nội dung trợ giúp động.
+	- Lưu ý: khi thêm lệnh mới, hãy cập nhật cả trường `usage` và `desc` trong mảng `COMMANDS` để phần `/help` hiển thị miêu tả ngắn chính xác cho người dùng. Đồng thời đảm bảo mô tả ngắn (`desc`) phù hợp để dùng khi đăng ký lệnh lên Telegram (trường `description`).
 - **Cập nhật tài liệu liên quan:** Sau khi cập nhật `COMMANDS`, hãy bổ sung mô tả tương ứng trong các file markdown liên quan (ví dụ: [my_skills/gas-bot-pro/SKILL.md](my_skills/gas-bot-pro/SKILL.md)). Có thể dùng một script đồng bộ (ví dụ: `tools/sync_help.js` hoặc `tools/add_command.js`) để chèn/mở rộng phần lệnh trong các `.md` giữa các marker `<!-- COMMANDS:START -->` / `<!-- COMMANDS:END -->`.
 - **Quy tắc tạo file mới:** Nếu cần tạo file mã mới khi thêm chức năng, file phải có định dạng `.gs` (Google Apps Script) và đặt ở cùng cấp với các file `.gs` hiện có trong repo (ví dụ: cùng thư mục với `bot.gs` và `config.gs`). Không tạo file .js/.ts ở vị trí mã GAS.
 - **Gợi ý công cụ:** Nên tạo một helper `tools/add_command.js` để:
