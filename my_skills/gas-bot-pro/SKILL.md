@@ -73,6 +73,17 @@ Ví dụ prompts để dùng với agent
 - "Viết hàm Apps Script phân tích chi tiêu tháng trước, trả về top 5 danh mục chi tiêu." 
 - "Viết parser CSV sao kê ngân hàng, map các cột `Date, Description, Amount` và thêm vào sheet `Transactions` tránh duplicate."
 
+Nhắc nhở (`/nhacnho`) — ví dụ định dạng thời gian được hỗ trợ
+
+- ` /nhacnho 13h20 Gọi điện ` → hiểu là 13:20:00 hôm nay (nếu 13:20 đã qua, sẽ đặt sang ngày mai)
+- ` /nhacnho 13:20 Gọi điện ` → tương tự, định dạng `HH:MM`
+- ` /nhacnho 20m nữa Uống thuốc ` → hiểu là 20 phút kể từ bây giờ
+- ` /nhacnho 2h nữa Hoàn thành báo cáo ` → hiểu là 2 giờ kể từ bây giờ
+- ` /nhacnho in 10m Kiểm tra email ` → cú pháp tiếng Anh tương thích (tương đương `10m nữa`)
+- ` /nhacnho 8h sáng mai Gặp khách ` → hỗ trợ `sáng/chiều/tối` và `ngày mai`
+
+Lưu ý: nếu người dùng gửi thời gian chỉ gồm giờ:phút mà thời điểm đó nhỏ hơn thời gian hiện tại, bot sẽ tự động đặt nhắc vào ngày kế tiếp.
+
 Tệp mẫu tham chiếu trong repo
 - [telegram-webhook/bot.gs](telegram-webhook/bot.gs)
 - [telegram-webhook/config.gs](telegram-webhook/config.gs)

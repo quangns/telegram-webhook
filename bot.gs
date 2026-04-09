@@ -7,8 +7,6 @@
 var COMMANDS = [
   {cmd: "/start", usage: "/start", desc: "Bắt đầu"},
   {cmd: "/help", usage: "/help", desc: "Xem hướng dẫn"},
-  {cmd: "/info", usage: "/info", desc: "Thông tin bot"},
-  {cmd: "/status", usage: "/status", desc: "Kiểm tra trạng thái"},
   {cmd: "/nhacnho", usage: "/nhacnho ...", desc: "Đặt nhắc (ví dụ: /nhacnho 8h sáng ngày mai Gặp khách)"},
   {cmd: "/log", usage: "/log [thu] [mô tả] [số tiền]", desc: "Ghi thu chi cá nhân"},
   {cmd: "/analyze", usage: "/analyze [1w|1m|tháng N]", desc: "Phân tích thu/chi theo danh mục trong khung thời gian (ví dụ: 1w, 1m, tháng 3)"}
@@ -326,6 +324,15 @@ function handleTelegramMessage(message) {
     } catch (err) {
       Logger.log('handle /log error: ' + err.toString());
       sendMessage(chatId, '❌ Lỗi khi xử lý /log.');
+    }
+  }
+  else if (text.startsWith("/nhacnho")) {
+    try {
+      var argsText = text.replace(/^\/nhacnho\b/i, '').trim();
+      handleNhacNhoCommand(chatId, userId, argsText);
+    } catch (e) {
+      Logger.log('handle /nhacnho error: ' + e.toString());
+      sendMessage(chatId, '❌ Lỗi khi đặt nhắc.');
     }
   }
   else if (text.startsWith("/")) {
@@ -1120,64 +1127,106 @@ function handleNhacNhoCommand(chatId, userId, argsText) {
     var whenDate = null;
     var messageText = '';
 
-    // 1) Vietnamese short form: "8h sáng ngày mai ..." or "8:30 chiều mai ..."
-    var m = rest.match(/^([0-9]{1,2})(?::([0-9]{2}))?\s*h?\s*(sáng|chiều|tối|sang|chieu|toi)?\s*(ngày mai|mai)?\s+([\s\S]+)$/i);
-    if (m) {
-      var hour = parseInt(m[1], 10);
-      var minute = m[2] ? parseInt(m[2], 10) : 0;
-      var period = (m[3] || '').toLowerCase();
-      var dayToken = (m[4] || '').toLowerCase();
-      messageText = (m[5] || '').trim();
+    // We'll try multiple parsing strategies. Keep track of how the time was parsed.
+    var parsedType = null; // 'relative' | 'absolute' | 'timeOnly' | 'timeWithDay'
+    var m;
+    var now = new Date();
 
-      var base = new Date();
-      if (dayToken === 'ngày mai' || dayToken === 'mai') base.setDate(base.getDate() + 1);
-      if (period === 'chiều' || period === 'chieu' || period === 'tối' || period === 'toi') {
-        if (hour < 12) hour += 12;
+    // 1) Vietnamese relative: "20m nữa ...", "20 phút nữa ...", "2h nữa ..." or "20m sau ..."
+    m = rest.match(/^([0-9]+)\s*(m|phút|phut|phút|h|giờ|gio)\s*(nữa|sau)?\s+([\s\S]+)$/i);
+    if (m) {
+      var valRel = parseInt(m[1], 10);
+      var unitRel = (m[2] || '').toLowerCase();
+      messageText = (m[4] || '').trim();
+      whenDate = new Date();
+      if (unitRel.indexOf('h') === 0 || unitRel.indexOf('gi') === 0) {
+        whenDate.setHours(whenDate.getHours() + valRel);
+      } else {
+        whenDate.setMinutes(whenDate.getMinutes() + valRel);
       }
-      if ((period === 'sáng' || period === 'sang') && hour === 12) hour = 0;
-      whenDate = new Date(base.getFullYear(), base.getMonth(), base.getDate(), hour, minute, 0);
+      parsedType = 'relative';
     }
 
-    // 2) Absolute datetime: YYYY-MM-DD HH:MM
+    // 1b) English style relative: "in 10m message"
+    if (!whenDate) {
+      m = rest.match(/^in\s+([0-9]+)(m|h)\s+([\s\S]+)$/i);
+      if (m) {
+        var val2 = parseInt(m[1], 10);
+        var unit2 = m[2].toLowerCase();
+        whenDate = new Date();
+        if (unit2 === 'm') whenDate.setMinutes(whenDate.getMinutes() + val2);
+        else whenDate.setHours(whenDate.getHours() + val2);
+        messageText = (m[3] || '').trim();
+        parsedType = 'relative';
+      }
+    }
+
+    // 2) Absolute datetime: YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM
     if (!whenDate) {
       m = rest.match(/^([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2})\s+([\s\S]+)$/);
       if (m) {
         whenDate = parseIsoLikeDate(m[1]);
         messageText = (m[2] || '').trim();
+        parsedType = 'absolute';
       }
     }
 
-    // 3) Time only today: HH:MM message
+    // 3) Time-only / Vietnamese short form: accept "8h", "8:30", "13h20" (no colon), optionally with 'sáng/chiều' and optional 'ngày mai'
+    if (!whenDate) {
+      m = rest.match(/^([0-9]{1,2})(?::([0-9]{2})|h([0-9]{2}))?\s*(sáng|chiều|tối|sang|chieu|toi)?\s*(ngày mai|mai)?\s+([\s\S]+)$/i);
+      if (m) {
+        var hour = parseInt(m[1], 10);
+        var minute = 0;
+        if (m[2]) minute = parseInt(m[2], 10);
+        else if (m[3]) minute = parseInt(m[3], 10);
+        var period = (m[4] || '').toLowerCase();
+        var dayToken = (m[5] || '').toLowerCase();
+        messageText = (m[6] || '').trim();
+
+        var base = new Date();
+        if (dayToken === 'ngày mai' || dayToken === 'mai') {
+          base.setDate(base.getDate() + 1);
+          parsedType = 'timeWithDay';
+        } else {
+          parsedType = 'timeOnly';
+        }
+        if (period === 'chiều' || period === 'chieu' || period === 'tối' || period === 'toi') {
+          if (hour < 12) hour += 12;
+        }
+        if ((period === 'sáng' || period === 'sang') && hour === 12) hour = 0;
+        whenDate = new Date(base.getFullYear(), base.getMonth(), base.getDate(), hour, minute, 0);
+      }
+    }
+
+    // 4) Fallback: HH:MM message (explicit 2-digit hour:minute)
     if (!whenDate) {
       m = rest.match(/^([0-9]{2}:[0-9]{2})\s+([\s\S]+)$/);
       if (m) {
         whenDate = parseTimeToday(m[1]);
         messageText = (m[2] || '').trim();
+        parsedType = 'timeOnly';
       }
     }
 
-    // 4) Relative: in 10m message or in 2h message
-    if (!whenDate) {
-      m = rest.match(/^in\s+([0-9]+)(m|h)\s+([\s\S]+)$/i);
-      if (m) {
-        var val = parseInt(m[1], 10);
-        var unit = m[2].toLowerCase();
-        whenDate = new Date();
-        if (unit === 'm') whenDate.setMinutes(whenDate.getMinutes() + val);
-        else whenDate.setHours(whenDate.getHours() + val);
-        messageText = (m[3] || '').trim();
-      }
-    }
 
     if (!whenDate || isNaN(whenDate.getTime())) {
-      sendMessage(chatId, '❌ Không nhận dạng được thời gian. Dùng: /nhacnho YYYY-MM-DD HH:MM lời_nhắc\nHoặc: /nhacnho 15:30 Gọi điện\nHoặc: /nhacnho in 10m Xong việc');
+      sendMessage(chatId, '❌ Không nhận dạng được thời gian. Dùng: /nhacnho YYYY-MM-DD HH:MM lời_nhắc\nHoặc: /nhacnho 15:30 Gọi điện\nHoặc: /nhacnho 20m nữa Gọi điện\nHoặc: /nhacnho in 10m Xong việc');
       return;
     }
 
-    var now = new Date();
+    // If parsed time is in the past, handle according to parsedType:
+    // - 'timeOnly': roll to next day
+    // - 'relative': should normally be future, but if not, add 1 minute
+    // - 'absolute' or 'timeWithDay': treat as error
     if (whenDate.getTime() <= now.getTime()) {
-      sendMessage(chatId, '❌ Thời gian đã qua. Vui lòng đặt thời gian trong tương lai.');
-      return;
+      if (parsedType === 'timeOnly') {
+        whenDate.setDate(whenDate.getDate() + 1);
+      } else if (parsedType === 'relative') {
+        whenDate = new Date(now.getTime() + 60 * 1000); // schedule 1 minute later as a recovery
+      } else {
+        sendMessage(chatId, '❌ Thời gian đã qua. Vui lòng đặt thời gian trong tương lai.');
+        return;
+      }
     }
 
     scheduleReminder(chatId, userId, whenDate, messageText);
