@@ -83,6 +83,39 @@ function updateBotCommand(command, description) {
 // Cấu hình được tách ra trong config.gs
 
 // ============================================
+// 0. SETUP WEBHOOK (moved to top)
+// ============================================
+function setupWebhook() {
+  try {
+    // Xóa webhook hiện tại để drop các tin nhắn pending
+    deleteWebhook();
+    // Chờ một chút để đảm bảo webhook đã bị xóa
+    Utilities.sleep(2000);
+    // Thiết lập webhook mới
+    var url = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=` + WEBAPPURL + '&drop_pending_updates=true';
+    var response = UrlFetchApp.fetch(url);
+    Logger.log("Setup webhook response: " + response.getContentText());
+    try {
+      // Register commands after webhook setup
+      if (Array.isArray(COMMANDS) && COMMANDS.length > 0) {
+        for (var i = 0; i < COMMANDS.length; i++) {
+          try {
+            var c = COMMANDS[i];
+            updateBotCommand(c.cmd || c.usage, c.desc || c.usage || '');
+          } catch (e) {
+            Logger.log('updateBotCommand error for ' + JSON.stringify(COMMANDS[i]) + ': ' + e.toString());
+          }
+        }
+      }
+    } catch (err) {
+      Logger.log('Error registering commands after webhook setup: ' + err.toString());
+    }
+  } catch (err) {
+    Logger.log('setupWebhook error: ' + err.toString());
+  }
+}
+
+// ============================================
 // 1. KHỞI TẠO WEBHOOK
 // ============================================
 function doPost(e) {
@@ -169,24 +202,35 @@ function handleTelegramMessage(message) {
     else if (text.startsWith("/analyze")) {
         try {
           var parts = text.split(/\s+/);
-          var arg = parts.slice(1).join(' ').trim();
+          var rawArg = parts.slice(1).join(' ').trim();
+
+          // Support optional focus type: leading 'chi' or 'thu'
+          var focusType = null;
+          var argWork = (rawArg || '').trim();
+          var mtype = argWork.match(/^(chi|thu)\b\s*/i);
+          if (mtype) {
+            focusType = mtype[1].toLowerCase();
+            argWork = argWork.replace(/^(chi|thu)\b\s*/i, '').trim();
+          }
+
+          var arg = argWork; // remaining arg used for range parsing
           var range = null;
           var now = new Date();
           if (!arg) {
             range = null; // full range
           } else if (/^(\d+)w$/i.test(arg)) {
             var w = parseInt(arg.match(/^(\d+)w$/i)[1], 10);
-            var from = new Date(now.getTime() - (w * 7 * 24 * 60 * 60 * 1000));
-            range = { from: from, to: now };
+            // start at 00:00 of (w*7) days ago, end at end of today
+            var from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (w * 7), 0, 0, 0, 0);
+            var to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+            range = { from: from, to: to };
           } else if (/^(\d+)m$/i.test(arg)) {
-            // interpret '1m' as current month from start
-            var m = parseInt(arg.match(/^(\d+)m$/i)[1], 10);
-            if (m === 1) {
-              var from = new Date(now.getFullYear(), now.getMonth(), 1);
-              range = { from: from, to: now };
-            } else {
-              range = null;
-            }
+            // interpret '1m' as last 30 days starting at 00:00 of 30 days ago
+            var mmCount = parseInt(arg.match(/^(\d+)m$/i)[1], 10);
+            var days = mmCount * 30;
+            var from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - days, 0, 0, 0, 0);
+            var to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+            range = { from: from, to: to };
           } else {
             // try parse Vietnamese 'tháng N [YYYY]'
             var mm = arg.match(/th[aá]ng\s*(\d{1,2})(?:\s+(\d{4}))?/i);
@@ -202,8 +246,9 @@ function handleTelegramMessage(message) {
             }
           }
 
-          createAnalysisSheet(range);
-          var msg = '✅ Đã tạo/‌cập nhật sheet "Analysis" và biểu đồ phân tích.';
+          createAnalysisSheet(range, focusType);
+          var noteTarget = focusType === 'chi' ? 'Chi' : (focusType === 'thu' ? 'Thu' : 'Chi & Thu');
+          var msg = '✅ Đã tạo/\u200ccập nhật sheet "Analysis" và biểu đồ phân tích (' + noteTarget + ').';
           if (range && range.from) {
             msg += '\nPhạm vi: ' + (range.from.toLocaleString('vi-VN')) + ' → ' + (range.to ? range.to.toLocaleString('vi-VN') : now.toLocaleString('vi-VN'));
           }
@@ -213,6 +258,76 @@ function handleTelegramMessage(message) {
           sendMessage(chatId, "❌ Lỗi khi phân tích: " + (err.message || err));
         }
       }
+  else if (text.startsWith("/log")) {
+    try {
+      // /log [thu] [mô tả] [số tiền]
+      var toks = text.split(/\s+/).slice(1); // drop command
+      if (!toks || toks.length === 0) {
+        sendMessage(chatId, '❌ Cách dùng: /log [thu] [mô tả] [số tiền] (ví dụ: /log ăn tối 10k hoặc /log thu lương 1000000)');
+      } else {
+        var type = 'chi';
+        var explicitType = false;
+        if (/^thu$/i.test(toks[0])) {
+          type = 'thu';
+          explicitType = true;
+          toks = toks.slice(1);
+        } else if (/^chi$/i.test(toks[0])) {
+          type = 'chi';
+          explicitType = true;
+          toks = toks.slice(1);
+        }
+
+        // amount is expected as last token
+        var amountToken = toks.length ? toks[toks.length - 1] : '';
+        var amountVal = parseAmountString(amountToken);
+        var description = '';
+        if (!isNaN(amountVal) && amountToken) {
+          description = toks.slice(0, toks.length - 1).join(' ').trim();
+        } else {
+          // try inline match for amount anywhere
+          var m = text.match(/([\d\.,]+\s*(k|m|tr|vnd)?)/i);
+          if (m) {
+            amountVal = parseAmountString(m[0]);
+            // remove matched amount from description
+            description = text.replace(/\/log\b/i, '').replace(m[0], '').trim();
+            // strip possible leading 'thu'/'chi'
+            description = description.replace(/^\s*(thu|chi)\b\s*/i, '').trim();
+          } else {
+            amountVal = NaN;
+          }
+        }
+
+        if (!description) description = '(no description)';
+
+        // auto-detect type from description if not explicit
+        try {
+          var autoCat = classifyDescription(description || '');
+          var autoCatLower = String(autoCat || '').toLowerCase();
+          if (!explicitType && (autoCatLower.indexOf('lương') !== -1 || autoCatLower.indexOf('thưởng') !== -1 || autoCatLower.indexOf('được') !== -1 || autoCatLower.indexOf('được') !== -1)) {
+            type = 'thu';
+          }
+        } catch (e) {
+          // ignore
+        }
+
+        if (isNaN(amountVal)) {
+          sendMessage(chatId, '❌ Không nhận dạng được số tiền. Vui lòng ghi dạng: /log [thu] Mô_tả 10000 (ví dụ: /log ăn tối 10k)');
+        } else {
+          // record
+          try {
+            logFinanceCommand(username, type, description, amountVal);
+            sendMessage(chatId, '✅ Đã ghi ' + (type === 'thu' ? 'Thu' : 'Chi') + ': ' + description + ' — ' + amountVal.toLocaleString('vi-VN') + ' VND');
+          } catch (err) {
+            Logger.log('log command save error: ' + err.toString());
+            sendMessage(chatId, '❌ Lỗi khi ghi lệnh. Vui lòng thử lại.');
+          }
+        }
+      }
+    } catch (err) {
+      Logger.log('handle /log error: ' + err.toString());
+      sendMessage(chatId, '❌ Lỗi khi xử lý /log.');
+    }
+  }
   else if (text.startsWith("/")) {
     sendMessage(chatId, "❌ Lệnh không tồn tại! Gõ /help để xem danh sách lệnh.");
   }
@@ -397,7 +512,7 @@ function logFinanceCommand(username, type, description, amount) {
       var idx = currentHeaders.indexOf(h);
       if (idx !== -1) row[idx] = v;
     }
-    setVal("Thời gian", new Date().toLocaleString('vi-VN'));
+    setVal("Thời gian", new Date().toISOString());
     setVal("Username", username);
     setVal("Loại", type === 'thu' ? 'Thu' : 'Chi');
     setVal("Danh mục", category);
@@ -435,37 +550,6 @@ function getMainKeyboard() {
       ]
     ]
   };
-}
-
-// ============================================
-// 8. THIẾT LẬP WEBHOOK (CHẠY 1 LẦN)
-// ============================================
-function setupWebhook() {
-  // Xóa webhook hiện tại để drop các tin nhắn pending
-  deleteWebhook();
-  
-  // Chờ một chút để đảm bảo webhook đã bị xóa
-  Utilities.sleep(2000);
-  
-  // Thiết lập webhook mới
-  var url = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=` + WEBAPPURL + '&drop_pending_updates=true';
-  var response = UrlFetchApp.fetch(url);
-  Logger.log("Setup webhook response: " + response.getContentText());
-  try {
-    // Register commands after webhook setup
-    if (Array.isArray(COMMANDS) && COMMANDS.length > 0) {
-      for (var i = 0; i < COMMANDS.length; i++) {
-        try {
-          var c = COMMANDS[i];
-          updateBotCommand(c.cmd || c.usage, c.desc || c.usage || '');
-        } catch (e) {
-          Logger.log('updateBotCommand error for ' + JSON.stringify(COMMANDS[i]) + ': ' + e.toString());
-        }
-      }
-    }
-  } catch (err) {
-    Logger.log('Error registering commands after webhook setup: ' + err.toString());
-  }
 }
 
 // ============================================
@@ -648,7 +732,7 @@ function appendTransactionsToFinanceLogs(rows, source) {
       var row = [];
       for (var c=0;c<headers.length;c++){
         var h = headers[c];
-        if (h === 'Thời gian') row.push(new Date().toLocaleString('vi-VN'));
+        if (h === 'Thời gian') row.push(new Date().toISOString());
         else if (h === 'Username') row.push(source);
         else if (String(h).toLowerCase().indexOf('loại')!==-1) row.push('Chi');
         else if (String(h).toLowerCase().indexOf('danh mục')!==-1) row.push(cat);
@@ -666,7 +750,7 @@ function appendTransactionsToFinanceLogs(rows, source) {
   }
 }
 
-function createAnalysisSheet(range) {
+function createAnalysisSheet(range, focusType) {
   try {
     var ss = SpreadsheetApp.openById(SHEET_ID);
     var dataSheet = ss.getSheetByName('FinanceLogs');
@@ -734,7 +818,14 @@ function createAnalysisSheet(range) {
 
     var analysis = ss.getSheetByName('Analysis');
     if (!analysis) analysis = ss.insertSheet('Analysis');
+    // Clear existing values and remove any old charts so we don't accumulate duplicates
     analysis.clear();
+    try {
+      var oldCharts = analysis.getCharts();
+      for (var ci = 0; ci < oldCharts.length; ci++) {
+        analysis.removeChart(oldCharts[ci]);
+      }
+    } catch (e) { Logger.log('Failed to remove old charts: ' + e.toString()); }
 
     // Build Chi table (A:B) and Thu table (D:E)
     var outChi = [['Danh mục (Chi)','Tổng (Chi)']];
@@ -742,15 +833,35 @@ function createAnalysisSheet(range) {
     var outThu = [['Danh mục (Thu)','Tổng (Thu)']];
     for (var k2 in sumsThu) outThu.push([k2, sumsThu[k2]]);
 
-    if (outChi.length === 1 && outThu.length === 1) {
-      analysis.getRange(1,1,1,1).setValue('Không có dữ liệu phù hợp với phạm vi đã chọn.');
-      return true;
-    }
+    var onlyChi = (String(focusType || '').toLowerCase() === 'chi');
+    var onlyThu = (String(focusType || '').toLowerCase() === 'thu');
 
-    if (outChi.length > 1) analysis.getRange(1,1,outChi.length,outChi[0].length).setValues(outChi);
-    if (outThu.length > 1) analysis.getRange(1,4,outThu.length,outThu[0].length).setValues(outThu);
-    try { if (outChi.length>1) analysis.getRange(2,2,outChi.length-1,1).setNumberFormat('#,##0'); } catch(e){}
-    try { if (outThu.length>1) analysis.getRange(2,5,outThu.length-1,1).setNumberFormat('#,##0'); } catch(e){}
+    // If user asked for only one type, show only that type and its chart (placed at A:B).
+    if (onlyChi) {
+      if (outChi.length === 1) {
+        analysis.getRange(1,1,1,1).setValue('Không có dữ liệu phù hợp với phạm vi đã chọn.');
+        return true;
+      }
+      analysis.getRange(1,1,outChi.length,outChi[0].length).setValues(outChi);
+      try { analysis.getRange(2,2,outChi.length-1,1).setNumberFormat('#,##0'); } catch(e){}
+    } else if (onlyThu) {
+      if (outThu.length === 1) {
+        analysis.getRange(1,1,1,1).setValue('Không có dữ liệu phù hợp với phạm vi đã chọn.');
+        return true;
+      }
+      // place Thu table at A:B when focusing only on Thu
+      analysis.getRange(1,1,outThu.length,outThu[0].length).setValues(outThu);
+      try { analysis.getRange(2,2,outThu.length-1,1).setNumberFormat('#,##0'); } catch(e){}
+    } else {
+      if (outChi.length === 1 && outThu.length === 1) {
+        analysis.getRange(1,1,1,1).setValue('Không có dữ liệu phù hợp với phạm vi đã chọn.');
+        return true;
+      }
+      if (outChi.length > 1) analysis.getRange(1,1,outChi.length,outChi[0].length).setValues(outChi);
+      if (outThu.length > 1) analysis.getRange(1,4,outThu.length,outThu[0].length).setValues(outThu);
+      try { if (outChi.length>1) analysis.getRange(2,2,outChi.length-1,1).setNumberFormat('#,##0'); } catch(e){}
+      try { if (outThu.length>1) analysis.getRange(2,5,outThu.length-1,1).setNumberFormat('#,##0'); } catch(e){}
+    }
 
     var noteText = 'Ghi chú: Báo cáo tổng hợp số tiền theo "Danh mục" lấy từ sheet "FinanceLogs". Thời gian tạo: ' + new Date().toLocaleString('vi-VN');
     if (range && range.from) {
@@ -777,11 +888,14 @@ function createAnalysisSheet(range) {
       // Thu chart
       var thuCount = outThu.length - 1;
       if (thuCount > 0) {
-        var thuRange = analysis.getRange(2,4,thuCount,2);
+        // If onlyThu was requested, the Thu table is placed at A:B; otherwise it's at D:E
+        var thuRangeRow = 2;
+        var thuRangeCol = (String(focusType || '').toLowerCase() === 'thu') ? 1 : 4;
+        var thuRange = analysis.getRange(thuRangeRow, thuRangeCol, thuCount, 2);
         var chartThu = analysis.newChart()
           .setChartType(Charts.ChartType.PIE)
           .addRange(thuRange)
-          .setPosition(2,9,0,0)
+          .setPosition(2, thuRangeCol + 3, 0, 0)
           .setOption('title', 'Phân bố Thu theo danh mục')
           .setOption('pieSliceText', 'percentage')
           .setOption('legend', 'right')
@@ -811,7 +925,7 @@ var CATEGORY_PATTERNS = {
   "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet"],
   "được cho": ["được"],
   "thư giãn": ["du lịch","du lich","tham quan","vui chơi","khách sạn","khach san","resort","spa","công viên","cong vien","tour","bảo tàng","bao tang"],
-  "quan hệ": ["mừng","đám","hiếu","hỉ","gửi","mừng cưới","đám cưới","đám hỏi","đám tang"]
+  "quan hệ": ["mừng","mung","đám","hiếu","hỉ","gửi","mừng cưới","mung cuoi","đám cưới","đám hỏi","đám tang","biếu","bieu","tặng","tang","cho"]
 };
 
 /**
@@ -888,6 +1002,11 @@ function classifyDescription(text) {
   // Loại bỏ dấu câu để tăng độ chính xác khi so khớp
   s = s.replace(/[.,;:!"'()\[\]\/\\-]/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
+
+  // Prioritize explicit relationship keywords (whole-word match).
+  // Include both accented and unaccented variants to improve matching from different sources.
+  var rel = s.match(/\b(mừng|mung|biếu|bieu|tặng|tang|cho)\b/);
+  if (rel) return 'quan hệ';
 
   // Special-case: xử lý các chuỗi chứa "vé <x>"
   if (s.indexOf('vé ') !== -1 || s.indexOf('ve ') !== -1) {
