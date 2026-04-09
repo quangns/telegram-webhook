@@ -925,7 +925,7 @@ var CATEGORY_PATTERNS = {
   "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet"],
   "được cho": ["được"],
   "thư giãn": ["du lịch","du lich","tham quan","vui chơi","khách sạn","khach san","resort","spa","công viên","cong vien","tour","bảo tàng","bao tang"],
-  "quan hệ": ["mừng","mung","đám","hiếu","hỉ","gửi","mừng cưới","mung cuoi","đám cưới","đám hỏi","đám tang","biếu","bieu","tặng","tang","cho"]
+  "quan hệ": ["mừng","mung","đám","hiếu","hỉ","gửi","mừng cưới","mung cuoi","đám cưới","đám hỏi","đám tang","biếu","bieu","tặng","tang","cho","ủng hộ","ung ho","ủng","ung"]
 };
 
 /**
@@ -1005,7 +1005,7 @@ function classifyDescription(text) {
 
   // Prioritize explicit relationship keywords (whole-word match).
   // Include both accented and unaccented variants to improve matching from different sources.
-  var rel = s.match(/\b(mừng|mung|biếu|bieu|tặng|tang|cho)\b/);
+  var rel = s.match(/\b(mừng|mung|biếu|bieu|tặng|tang|cho|ủng\s*hộ|ung\s*ho|ủng|ung)\b/);
   if (rel) return 'quan hệ';
 
   // Special-case: xử lý các chuỗi chứa "vé <x>"
