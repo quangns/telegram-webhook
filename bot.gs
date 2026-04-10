@@ -1132,8 +1132,9 @@ function handleNhacNhoCommand(chatId, userId, argsText) {
     var m;
     var now = new Date();
 
-    // 1) Vietnamese relative: "20m nữa ...", "20 phút nữa ...", "2h nữa ..." or "20m sau ..."
-    m = rest.match(/^([0-9]+)\s*(m|phút|phut|phút|h|giờ|gio)\s*(nữa|sau)?\s+([\s\S]+)$/i);
+    // 1) Vietnamese relative: require explicit suffix ("nữa" or "sau") to be treated as a relative offset
+    // examples: "20m nữa ...", "20 phút nữa ...", "2h nữa ...", "20m sau ..."
+    m = rest.match(/^([0-9]+)\s*(m|phút|phut|phút|h|giờ|gio)\s+(nữa|sau)\s+([\s\S]+)$/i);
     if (m) {
       var valRel = parseInt(m[1], 10);
       var unitRel = (m[2] || '').toLowerCase();
@@ -1171,14 +1172,15 @@ function handleNhacNhoCommand(chatId, userId, argsText) {
       }
     }
 
-    // 3) Time-only / Vietnamese short form: accept "8h", "8:30", "13h20" (no colon), optionally with 'sáng/chiều' and optional 'ngày mai'
+    // 3) Time-only / Vietnamese short form: accept "8h", "8:30", "13h20" (with or without colon), optionally with 'sáng/chiều' and optional 'ngày mai'
+    // This will correctly match "20h ăn tối" as 20:00 today (or next day if already passed).
     if (!whenDate) {
-      m = rest.match(/^([0-9]{1,2})(?::([0-9]{2})|h([0-9]{2}))?\s*(sáng|chiều|tối|sang|chieu|toi)?\s*(ngày mai|mai)?\s+([\s\S]+)$/i);
+      m = rest.match(/^([0-9]{1,2})(?::([0-9]{2})|h([0-9]{1,2})?)?\s*(sáng|chiều|tối|sang|chieu|toi)?\s*(ngày mai|mai)?\s+([\s\S]+)$/i);
       if (m) {
         var hour = parseInt(m[1], 10);
         var minute = 0;
         if (m[2]) minute = parseInt(m[2], 10);
-        else if (m[3]) minute = parseInt(m[3], 10);
+        else if (typeof m[3] !== 'undefined' && m[3] !== '') minute = parseInt(m[3], 10);
         var period = (m[4] || '').toLowerCase();
         var dayToken = (m[5] || '').toLowerCase();
         messageText = (m[6] || '').trim();
