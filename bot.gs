@@ -597,7 +597,7 @@ function logFinanceCommand(username, type, description, amount) {
       var idx = currentHeaders.indexOf(h);
       if (idx !== -1) row[idx] = v;
     }
-    setVal("Thời gian", new Date().toISOString());
+    setVal("Thời gian", new Date());
     setVal("Username", username);
     setVal("Loại", type === 'thu' ? 'Thu' : 'Chi');
     setVal("Danh mục", category);
@@ -605,6 +605,14 @@ function logFinanceCommand(username, type, description, amount) {
     setVal("Số tiền (VND)", amount);
 
     sheet.appendRow(row);
+    try {
+      var headersAll = ensureFinanceLogsHeaders(sheet);
+      var timeColIdxLog = findFinanceHeaderIndex(headersAll, ['Thời gian', 'Thoi gian']);
+      if (timeColIdxLog !== -1) {
+        var dataRangeLog = sheet.getRange(2, 1, sheet.getLastRow() - 1, headersAll.length);
+        dataRangeLog.sort({ column: timeColIdxLog + 1, ascending: true });
+      }
+    } catch (e) { Logger.log('Sorting after logFinanceCommand failed: ' + e.toString()); }
     Logger.log("Logged /log command: " + username + " -> " + type + " " + description + " " + amount + " (category=" + category + ")");
   } catch (error) {
     Logger.log("Error logging /log command: " + error.toString());
@@ -894,10 +902,18 @@ function readFirstWorksheetRowsFromXlsxBlob(blob) {
   return rows;
 }
 
-function parseBankDateToIso(value) {
-  if (value instanceof Date && !isNaN(value.getTime())) return value.toISOString();
+function getScriptTimeZoneSafe() {
+  try {
+    return Session.getScriptTimeZone() || 'Asia/Ho_Chi_Minh';
+  } catch (err) {
+    return 'Asia/Ho_Chi_Minh';
+  }
+}
+
+function parseBankDateValue(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) return new Date(value.getTime());
   var s = String(value || '').trim();
-  if (!s) return '';
+  if (!s) return null;
   var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (m) {
     var day = parseInt(m[1], 10);
@@ -906,10 +922,16 @@ function parseBankDateToIso(value) {
     var hour = m[4] ? parseInt(m[4], 10) : 0;
     var minute = m[5] ? parseInt(m[5], 10) : 0;
     var second = m[6] ? parseInt(m[6], 10) : 0;
-    return new Date(year, month, day, hour, minute, second).toISOString();
+    return new Date(year, month, day, hour, minute, second);
   }
   var parsed = Date.parse(s);
-  return isNaN(parsed) ? '' : new Date(parsed).toISOString();
+  return isNaN(parsed) ? null : new Date(parsed);
+}
+
+function formatBankDateKey(value) {
+  var dateValue = parseBankDateValue(value);
+  if (!dateValue) return '';
+  return Utilities.formatDate(dateValue, getScriptTimeZoneSafe(), "yyyy-MM-dd'T'HH:mm:ss");
 }
 
 function getFinanceLogsHeaders() {
@@ -1030,7 +1052,7 @@ function backfillFinanceLogsButToan(sheet, headers) {
     }
 
     var generated = buildButToanValue({
-      dateIso: timeIdx >= 0 ? parseBankDateToIso(rows[i][timeIdx]) : '',
+      dateIso: timeIdx >= 0 ? formatBankDateKey(rows[i][timeIdx]) : '',
       type: typeIdx >= 0 ? String(rows[i][typeIdx] || '').trim() : '',
       description: descIdx >= 0 ? String(rows[i][descIdx] || '').trim() : ''
     }, source, amtIdx >= 0 ? parseAmountString(rows[i][amtIdx]) : NaN);
@@ -1090,18 +1112,18 @@ function importTechStatementBlobToFinanceLogs(blob, filename) {
       var picked = debitInfo || creditInfo;
       if (!picked) continue;
 
-      var dateIso = parseBankDateToIso(dateRaw);
-      if (!dateIso) continue;
+      var dateValue = parseBankDateValue(dateRaw);
+      if (!dateValue) continue;
 
       rows.push({
-        dateIso: dateIso,
+        dateValue: dateValue,
         description: desc || 'Giao dịch sao kê Tech',
         amount: String(picked.raw),
         type: debitInfo ? 'Chi' : 'Thu',
         username: 'saoke-tech',
         butToan: buildButToanValue({
           butToan: butToan,
-          dateIso: dateIso,
+          dateIso: formatBankDateKey(dateValue),
           type: debitInfo ? 'Chi' : 'Thu',
           description: desc || 'Giao dịch sao kê Tech'
         }, 'saoke-tech', picked.amount)
@@ -1150,7 +1172,7 @@ function importXlsxBlobToFinanceLogs(blob, filename) {
       rows.push({
         description: desc,
         amount: String(amt),
-        dateIso: dateIdx >= 0 ? parseBankDateToIso(data[i][dateIdx]) : '',
+        dateValue: dateIdx >= 0 ? parseBankDateValue(data[i][dateIdx]) : null,
         type: typeIdx >= 0 ? String(data[i][typeIdx] || '').trim() : '',
         butToan: butToanIdx >= 0 ? String(data[i][butToanIdx] || '').trim() : ''
       });
@@ -1237,7 +1259,8 @@ function appendTransactionsToFinanceLogs(rows, source) {
       }
       var cat = classifyDescription(desc);
       var explicitType = rows[i].type || 'Chi';
-      var explicitDateIso = rows[i].dateIso || new Date().toISOString();
+      var explicitDateValue = rows[i].dateValue || parseBankDateValue(rows[i].dateIso) || new Date();
+      var explicitDateIso = formatBankDateKey(explicitDateValue);
       var username = rows[i].username || source;
       var butToan = buildButToanValue({
         butToan: rows[i].butToan,
@@ -1255,7 +1278,7 @@ function appendTransactionsToFinanceLogs(rows, source) {
       for (var c = 0; c < headers.length; c++) {
         var h = headers[c];
         var hLower = String(h).toLowerCase();
-        if (h === 'Thời gian') outRow.push(explicitDateIso);
+        if (h === 'Thời gian') outRow.push(explicitDateValue);
         else if (h === 'Username') outRow.push(username);
         else if (hLower.indexOf('loại') !== -1 || hLower.indexOf('loai') !== -1) outRow.push(explicitType);
         else if (hLower.indexOf('danh mục') !== -1 || hLower.indexOf('danh muc') !== -1) outRow.push(cat);
@@ -1269,6 +1292,14 @@ function appendTransactionsToFinanceLogs(rows, source) {
     }
     if (out.length > 0) {
       sheet.getRange(sheet.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
+      try {
+        // After inserting, sort the data range by the `Thời gian` column if present
+        var timeColIdx = findFinanceHeaderIndex(headers, ['Thời gian', 'Thoi gian']);
+        if (timeColIdx !== -1) {
+          var dataRange = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length);
+          dataRange.sort({ column: timeColIdx + 1, ascending: true });
+        }
+      } catch (e) { Logger.log('Sorting FinanceLogs failed: ' + e.toString()); }
     }
     result.inserted = out.length;
     return result;
@@ -1447,7 +1478,7 @@ function createAnalysisSheet(range, focusType) {
 // Mẫu từ khóa/regex cho từng danh mục
 // Mẫu từ khóa cho từng danh mục (sử dụng so khớp chuỗi để tương thích Unicode)
 var CATEGORY_PATTERNS = {
-  "đầu tư": ["lợi nhuận","loi nhuan","sinh lời","sinh loi","quyền mua","quyen mua","nghia vu thanh toan ck","nghĩa vụ thanh toán ck","tra lai so du","trả lãi số dư"],
+  "đầu tư": ["lợi nhuận","loi nhuan","sinh lời","sinh loi","quyền mua","quyen mua","nghia vu thanh toan ck","nghĩa vụ thanh toán ck","tra lai so du","trả lãi số dư","chứng khoán","chung khoan","tài khoản chứng khoán","tai khoan chung khoan","tk chung khoan","mua chứng khoán","mua ck","bán chứng khoán","ban ck","cổ phiếu","co phieu"],
   "lương thưởng": ["lương","thưởng","salary","bonus","payroll","nhận","chuyển khoản"],
   "ăn uống": ["nhà hàng","ăn uống","ăn tối","ăn trưa","ăn sáng","ăn","cơm","quán","cafe","cà phê","trà sữa","phở","bún","ăn vặt","ăn nhẹ","siêu thị","grocery","chợ"],
   "xăng xe": ["gửi xe","xăng","đổ xăng","bơm xăng","nhien lieu","nhiên liệu","petrol","diesel","gas","xăng xe","đổ","rút xăng","thuê xe","xe ôm","grab","taxi","xe máy","xe tải"],
