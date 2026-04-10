@@ -9,7 +9,8 @@ var COMMANDS = [
   {cmd: "/help", usage: "/help", desc: "Xem hướng dẫn"},
   {cmd: "/nhacnho", usage: "/nhacnho ...", desc: "Đặt nhắc (ví dụ: /nhacnho 8h sáng ngày mai Gặp khách)"},
   {cmd: "/log", usage: "/log [thu] [mô tả] [số tiền]", desc: "Ghi thu chi cá nhân"},
-  {cmd: "/analyze", usage: "/analyze [1w|1m|tháng N]", desc: "Phân tích thu/chi theo danh mục trong khung thời gian (ví dụ: 1w, 1m, tháng 3)"}
+  {cmd: "/analyze", usage: "/analyze [1w|1m|tháng N]", desc: "Phân tích thu/chi theo danh mục trong khung thời gian (ví dụ: 1w, 1m, tháng 3)"},
+  {cmd: "/saoke", usage: "/saoke [bank]", desc: "Nhập sao kê ngân hàng vào FinanceLogs"}
 ];
 
 // Function to update bot commands dynamically and sync with Telegram
@@ -158,11 +159,29 @@ function handleTelegramMessage(message) {
   const chatId = message.chat.id;
   const userId = message.from.id;
   const username = message.from.username || "Unknown";
-  let text = String(message.text || "");
+  let text = String(message.text || message.caption || "");
   const messageId = message.message_id;
 
-  // If message contains a document (file) -> handle import
+  // If message contains a document (file), prioritize /saoke or pending bank-import flow.
   if (message.document) {
+    try {
+      var docCommandText = String(message.text || message.caption || '').trim();
+      if (docCommandText && docCommandText.startsWith('/saoke')) {
+        handleSaokeCommand(chatId, userId, docCommandText.replace(/^\/saoke\b/i, '').trim(), message);
+        return;
+      }
+
+      var docProps = PropertiesService.getScriptProperties();
+      var pendingBank = docProps.getProperty('PENDING_SAOKE_' + chatId);
+      if (pendingBank) {
+        docProps.deleteProperty('PENDING_SAOKE_' + chatId);
+        handleSaokeCommand(chatId, userId, pendingBank, message);
+        return;
+      }
+    } catch (docErr) {
+      Logger.log('document-command-routing error: ' + docErr.toString());
+    }
+
     handleDocumentMessage(message);
     return;
   }
@@ -390,6 +409,15 @@ function handleTelegramMessage(message) {
     } catch (e) {
       Logger.log('handle /nhacnho error: ' + e.toString());
       sendMessage(chatId, '❌ Lỗi khi đặt nhắc.');
+    }
+  }
+  else if (text.startsWith("/saoke")) {
+    try {
+      var saokeArgsText = text.replace(/^\/saoke\b/i, '').trim();
+      handleSaokeCommand(chatId, userId, saokeArgsText, message);
+    } catch (e) {
+      Logger.log('handle /saoke error: ' + e.toString());
+      sendMessage(chatId, '❌ Lỗi khi xử lý /saoke.');
     }
   }
   else if (text.startsWith("/")) {
@@ -681,8 +709,20 @@ function handleDocumentMessage(message) {
     // Decide by extension
     var lower = fileName.toLowerCase();
     if (lower.endsWith('.xlsx') || lower.endsWith('.xls') || doc.mime_type && doc.mime_type.indexOf('spreadsheet') !== -1) {
-      var added = importXlsxBlobToFinanceLogs(blob, fileName);
-      sendMessage(chatId, "✅ Đã import " + added + " giao dịch từ file spreadsheet.");
+      var added = 0;
+      var looksLikeTech = /saoketk|saoke|tech/i.test(lower);
+      if (looksLikeTech) {
+        added = importTechStatementBlobToFinanceLogs(blob, fileName);
+      }
+      if (!added) {
+        added = importXlsxBlobToFinanceLogs(blob, fileName);
+      }
+
+      if (added > 0) {
+        sendMessage(chatId, "✅ Đã import " + added + " giao dịch từ file spreadsheet.");
+      } else {
+        sendMessage(chatId, "⚠️ Chưa bóc tách được dữ liệu từ file spreadsheet. Nếu đây là sao kê Tech, hãy gửi `/saoke tech` kèm file hoặc reply lệnh đó rồi gửi file.");
+      }
     } else if (lower.endsWith('.pdf') || doc.mime_type && doc.mime_type.indexOf('pdf') !== -1) {
       var added2 = importPdfBlobToFinanceLogs(blob, fileName);
       sendMessage(chatId, "✅ Đã import ~" + added2 + " giao dịch từ file PDF (kết quả ước lượng).");
@@ -691,6 +731,247 @@ function handleDocumentMessage(message) {
     }
   } catch (err) {
     Logger.log('handleDocumentMessage error: ' + err.toString());
+  }
+}
+
+function handleSaokeCommand(chatId, userId, argsText, message) {
+  try {
+    var bank = String(argsText || '').trim().toLowerCase();
+    if (!bank) {
+      sendMessage(chatId, '❌ Cách dùng: /saoke [bank]\nVí dụ: /saoke tech rồi gửi hoặc forward file sao kê vào chat.');
+      return;
+    }
+
+    var doc = null;
+    if (message && message.document) doc = message.document;
+    else if (message && message.reply_to_message && message.reply_to_message.document) doc = message.reply_to_message.document;
+
+    if (!doc) {
+      PropertiesService.getScriptProperties().setProperty('PENDING_SAOKE_' + chatId, bank);
+      sendMessage(chatId, '📎 Đã ghi nhận `/saoke ' + bank + '`. Bây giờ hãy gửi hoặc forward file sao kê để tôi ghi vào `FinanceLogs`.');
+      return;
+    }
+
+    var fileId = doc.file_id;
+    var fileName = doc.file_name || ('file_' + new Date().getTime());
+    var resp = UrlFetchApp.fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+    var data = JSON.parse(resp.getContentText());
+    if (!data.ok) {
+      sendMessage(chatId, '❌ Không tải được file từ Telegram.');
+      return;
+    }
+
+    var filePath = data.result.file_path;
+    var fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+    var blob = UrlFetchApp.fetch(fileUrl).getBlob();
+    blob.setName(fileName);
+
+    var added = 0;
+    if (bank === 'tech') {
+      added = importTechStatementBlobToFinanceLogs(blob, fileName);
+    } else {
+      added = importXlsxBlobToFinanceLogs(blob, fileName);
+    }
+
+    if (added > 0) {
+      sendMessage(chatId, '✅ Đã import ' + added + ' giao dịch từ sao kê ' + bank + ' vào FinanceLogs.');
+    } else {
+      sendMessage(chatId, '⚠️ Không bóc tách được giao dịch nào từ file ' + fileName + '. Hãy kiểm tra đúng mẫu sao kê rồi thử lại.');
+    }
+  } catch (err) {
+    Logger.log('handleSaokeCommand error: ' + err.toString());
+    sendMessage(chatId, '❌ Lỗi khi xử lý sao kê.');
+  }
+}
+
+function openSpreadsheetFromExcelBlob(blob, filename) {
+  var resource = { title: filename };
+  var file = Drive.Files.insert(resource, blob, { convert: true });
+  return SpreadsheetApp.openById(file.id);
+}
+
+function readFirstWorksheetRowsFromXlsxBlob(blob) {
+  var files = Utilities.unzip(blob);
+  if (!files || !files.length) throw new Error('Không giải nén được file .xlsx');
+
+  var fileMap = {};
+  for (var i = 0; i < files.length; i++) {
+    fileMap[files[i].getName()] = files[i].getDataAsString();
+  }
+
+  var mainNs = XmlService.getNamespace('http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+  var relNs = XmlService.getNamespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships');
+  var pkgNs = XmlService.getNamespace('http://schemas.openxmlformats.org/package/2006/relationships');
+
+  function colLettersToIndex(letters) {
+    var n = 0;
+    for (var j = 0; j < letters.length; j++) {
+      n = n * 26 + (letters.charCodeAt(j) - 64);
+    }
+    return n - 1;
+  }
+
+  function getNestedText(node) {
+    var out = [];
+    var descendants = node.getDescendants();
+    for (var d = 0; d < descendants.length; d++) {
+      var item = descendants[d];
+      if (item.getType && item.getType() === XmlService.ContentTypes.ELEMENT) {
+        var el = item.asElement();
+        if (el.getName() === 't') out.push(el.getText());
+      }
+    }
+    return out.join('');
+  }
+
+  var shared = [];
+  if (fileMap['xl/sharedStrings.xml']) {
+    var sharedDoc = XmlService.parse(fileMap['xl/sharedStrings.xml']);
+    var sis = sharedDoc.getRootElement().getChildren('si', mainNs);
+    for (var s = 0; s < sis.length; s++) {
+      shared.push(getNestedText(sis[s]));
+    }
+  }
+
+  var workbookDoc = XmlService.parse(fileMap['xl/workbook.xml']);
+  var sheetsNode = workbookDoc.getRootElement().getChild('sheets', mainNs);
+  var sheetNodes = sheetsNode ? sheetsNode.getChildren('sheet', mainNs) : [];
+  if (!sheetNodes.length) throw new Error('Không tìm thấy worksheet trong file .xlsx');
+
+  var ridAttr = sheetNodes[0].getAttribute('id', relNs);
+  var rid = ridAttr ? ridAttr.getValue() : null;
+  if (!rid) throw new Error('Không tìm thấy relationship id của worksheet');
+
+  var relsDoc = XmlService.parse(fileMap['xl/_rels/workbook.xml.rels']);
+  var relNodes = relsDoc.getRootElement().getChildren('Relationship', pkgNs);
+  var target = null;
+  for (var r = 0; r < relNodes.length; r++) {
+    if (relNodes[r].getAttribute('Id') && relNodes[r].getAttribute('Id').getValue() === rid) {
+      target = relNodes[r].getAttribute('Target').getValue();
+      break;
+    }
+  }
+  if (!target) throw new Error('Không tìm thấy worksheet target trong workbook rels');
+  if (target.indexOf('xl/') !== 0) target = 'xl/' + target.replace(/^\/+/, '');
+
+  var sheetDoc = XmlService.parse(fileMap[target]);
+  var sheetData = sheetDoc.getRootElement().getChild('sheetData', mainNs);
+  var rowNodes = sheetData ? sheetData.getChildren('row', mainNs) : [];
+  var rows = [];
+
+  for (var iRow = 0; iRow < rowNodes.length; iRow++) {
+    var rowNode = rowNodes[iRow];
+    var rowNumAttr = rowNode.getAttribute('r');
+    var rowNum = rowNumAttr ? parseInt(rowNumAttr.getValue(), 10) : (iRow + 1);
+    var row = [];
+    var cells = rowNode.getChildren('c', mainNs);
+
+    for (var iCell = 0; iCell < cells.length; iCell++) {
+      var cell = cells[iCell];
+      var refAttr = cell.getAttribute('r');
+      var ref = refAttr ? refAttr.getValue() : '';
+      var colLetters = (ref.match(/[A-Z]+/) || ['A'])[0];
+      var colIdx = colLettersToIndex(colLetters);
+      var typeAttr = cell.getAttribute('t');
+      var cellType = typeAttr ? typeAttr.getValue() : '';
+      var value = '';
+
+      if (cellType === 'inlineStr') {
+        var inlineNode = cell.getChild('is', mainNs);
+        value = inlineNode ? getNestedText(inlineNode) : '';
+      } else {
+        var valueNode = cell.getChild('v', mainNs);
+        if (valueNode) {
+          var raw = valueNode.getText();
+          if (cellType === 's') value = shared[parseInt(raw, 10)] || '';
+          else value = raw;
+        }
+      }
+
+      row[colIdx] = value;
+    }
+
+    rows[rowNum - 1] = row;
+  }
+
+  return rows;
+}
+
+function parseBankDateToIso(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) return value.toISOString();
+  var s = String(value || '').trim();
+  if (!s) return '';
+  var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    var day = parseInt(m[1], 10);
+    var month = parseInt(m[2], 10) - 1;
+    var year = parseInt(m[3], 10);
+    var hour = m[4] ? parseInt(m[4], 10) : 0;
+    var minute = m[5] ? parseInt(m[5], 10) : 0;
+    var second = m[6] ? parseInt(m[6], 10) : 0;
+    return new Date(year, month, day, hour, minute, second).toISOString();
+  }
+  var parsed = Date.parse(s);
+  return isNaN(parsed) ? '' : new Date(parsed).toISOString();
+}
+
+function findFirstAmountInColumns(row, startCol1Based, endCol1Based) {
+  for (var c = startCol1Based - 1; c <= endCol1Based - 1 && c < row.length; c++) {
+    var value = row[c];
+    if (value === '' || value == null) continue;
+    var parsed = parseAmountString(value);
+    if (!isNaN(parsed) && parsed > 0) {
+      return { raw: value, amount: parsed, column: c + 1 };
+    }
+  }
+  return null;
+}
+
+function importTechStatementBlobToFinanceLogs(blob, filename) {
+  try {
+    var data;
+    try {
+      data = readFirstWorksheetRowsFromXlsxBlob(blob);
+    } catch (zipErr) {
+      Logger.log('readFirstWorksheetRowsFromXlsxBlob fallback: ' + zipErr.toString());
+      var ss = openSpreadsheetFromExcelBlob(blob, filename);
+      data = ss.getSheets()[0].getDataRange().getValues();
+    }
+
+    if (!data || data.length < 35) return 0;
+
+    // Layout verified from sample `SaoKeTK_04042026_10042026.xlsx`
+    // Row 33: headers, Row 34: opening balance, Row 35+: transactions.
+    var rows = [];
+    for (var r = 34; r < data.length; r++) {
+      var row = data[r] || [];
+      var dateRaw = row[1]; // C2: Ngày giao dịch
+      var desc = String(row[24] || '').trim(); // C25: Diễn giải
+
+      if (!dateRaw && !desc) continue;
+
+      var debitInfo = findFirstAmountInColumns(row, 47, 52);
+      var creditInfo = findFirstAmountInColumns(row, 53, 58);
+      var picked = debitInfo || creditInfo;
+      if (!picked) continue;
+
+      var dateIso = parseBankDateToIso(dateRaw);
+      if (!dateIso) continue;
+
+      rows.push({
+        dateIso: dateIso,
+        description: desc || 'Giao dịch sao kê Tech',
+        amount: String(picked.raw),
+        type: debitInfo ? 'Chi' : 'Thu',
+        username: 'saoke-tech'
+      });
+    }
+
+    Logger.log('importTechStatementBlobToFinanceLogs rows=' + rows.length + ' file=' + filename);
+    return appendTransactionsToFinanceLogs(rows, 'saoke-tech');
+  } catch (err) {
+    Logger.log('importTechStatementBlobToFinanceLogs error: ' + err.toString());
+    return 0;
   }
 }
 
@@ -779,7 +1060,7 @@ function parseBankStatementText(text) {
 
 function appendTransactionsToFinanceLogs(rows, source) {
   try {
-    if (!rows || rows.length===0) return 0;
+    if (!rows || rows.length === 0) return 0;
     var ss = SpreadsheetApp.openById(SHEET_ID);
     var sheet = ss.getSheetByName('FinanceLogs');
     if (!sheet) {
@@ -787,26 +1068,33 @@ function appendTransactionsToFinanceLogs(rows, source) {
       sheet.appendRow(['Thời gian','Username','Loại','Danh mục','Mô tả','Số tiền (VND)']);
     }
     var lastCol = sheet.getLastColumn();
-    var headers = sheet.getRange(1,1,1,lastCol).getValues()[0];
+    var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
     var out = [];
-    for (var i=0;i<rows.length;i++){
-      var desc = rows[i].description;
+    for (var i = 0; i < rows.length; i++) {
+      var desc = rows[i].description || '';
       var amt = parseAmountString(rows[i].amount);
+      if (isNaN(amt)) continue;
       var cat = classifyDescription(desc);
-      var row = [];
-      for (var c=0;c<headers.length;c++){
+      var explicitType = rows[i].type || 'Chi';
+      var explicitDateIso = rows[i].dateIso || new Date().toISOString();
+      var username = rows[i].username || source;
+      var outRow = [];
+      for (var c = 0; c < headers.length; c++) {
         var h = headers[c];
-        if (h === 'Thời gian') row.push(new Date().toISOString());
-        else if (h === 'Username') row.push(source);
-        else if (String(h).toLowerCase().indexOf('loại')!==-1) row.push('Chi');
-        else if (String(h).toLowerCase().indexOf('danh mục')!==-1) row.push(cat);
-        else if (String(h).toLowerCase().indexOf('mô tả')!==-1 || String(h).toLowerCase().indexOf('mota')!==-1) row.push(desc);
-        else if (String(h).toLowerCase().indexOf('số tiền')!==-1 || String(h).toLowerCase().indexOf('so tien')!==-1) row.push(amt);
-        else row.push('');
+        var hLower = String(h).toLowerCase();
+        if (h === 'Thời gian') outRow.push(explicitDateIso);
+        else if (h === 'Username') outRow.push(username);
+        else if (hLower.indexOf('loại') !== -1 || hLower.indexOf('loai') !== -1) outRow.push(explicitType);
+        else if (hLower.indexOf('danh mục') !== -1 || hLower.indexOf('danh muc') !== -1) outRow.push(cat);
+        else if (hLower.indexOf('mô tả') !== -1 || hLower.indexOf('mo ta') !== -1 || hLower.indexOf('mota') !== -1) outRow.push(desc);
+        else if (hLower.indexOf('số tiền') !== -1 || hLower.indexOf('so tien') !== -1 || hLower.indexOf('sotien') !== -1) outRow.push(amt);
+        else outRow.push('');
       }
-      out.push(row);
+      out.push(outRow);
     }
-    sheet.getRange(sheet.getLastRow()+1,1,out.length,out[0].length).setValues(out);
+    if (out.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
+    }
     return out.length;
   } catch (err) {
     Logger.log('appendTransactionsToFinanceLogs error: ' + err.toString());
@@ -1004,6 +1292,16 @@ function parseAmountString(raw) {
 
   // if plain number with commas or dots: "47,000" or "47000"
   if (/^[\d.,]+$/.test(s)) {
+    if (/^\d{1,3}([.,]\d{3})+$/.test(s)) {
+      var whole = parseInt(s.replace(/[.,]/g, ''), 10);
+      return isNaN(whole) ? NaN : whole;
+    }
+    var normalized = s;
+    if ((s.match(/[.,]/g) || []).length > 1) {
+      normalized = s.replace(/[.,]/g, '');
+      var whole2 = parseInt(normalized, 10);
+      return isNaN(whole2) ? NaN : whole2;
+    }
     var num = parseFloat(s.replace(/,/g, '.'));
     return isNaN(num) ? NaN : Math.round(num);
   }
