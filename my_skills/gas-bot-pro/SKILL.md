@@ -43,6 +43,7 @@ Quy trình bước-by-step (Workflow)
 	- Lấy `BOT_TOKEN` từ BotFather và cấu hình webhook/route (tham chiếu file mẫu `telegram-webhook/bot.gs`).
 2) Định nghĩa model dữ liệu
 	- Lưu giao dịch vào Google Sheet hoặc Firestore: cột tối thiểu `date, amount, currency, category, description, source`.
+	- Với `FinanceLogs`, nên có thêm cột `bút toán` để lưu mã giao dịch hoặc khóa dedupe cho các dòng import sao kê.
 3) Lệnh nhập liệu trên Telegram
 	- Thiết kế command: `/chi_tieu 2026-04-08 120000 mua_cafe "Cà phê sáng"`
 	- Hỗ trợ quick replies: `+ Thêm tiêu đề, Chọn danh mục`.
@@ -53,7 +54,7 @@ Quy trình bước-by-step (Workflow)
 6) Nhập sao kê ngân hàng
 	- Hỗ trợ CSV/Excel: map cột ngày, mô tả, số tiền.
 	- Nếu file là PDF: hướng dẫn OCR (tesseract hoặc Google Drive OCR + Apps Script Advanced Drive API) để xuất CSV trước khi parse.
-	- Gắn logic khớp giao dịch: tìm theo ngày, số tiền và mô tả để tránh duplicate.
+	- Gắn logic khớp giao dịch: ưu tiên kiểm tra cột `bút toán`; nếu file không có mã gốc thì tạo khóa ổn định từ ngày, loại, số tiền và mô tả để tránh duplicate.
 7) Hoàn thiện UX
 	- Thêm phản hồi rõ ràng (confirm, undo), ghi nhận nguồn (manual/upload/bank), và log thay đổi.
 

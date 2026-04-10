@@ -575,7 +575,7 @@ function logFinanceCommand(username, type, description, amount) {
   try {
     var spreadsheet = SpreadsheetApp.openById(SHEET_ID);
     var sheet = spreadsheet.getSheetByName("FinanceLogs");
-    var desiredHeaders = ["Thời gian", "Username", "Loại", "Danh mục", "Mô tả", "Số tiền (VND)"];
+    var desiredHeaders = getFinanceLogsHeaders();
     if (!sheet) {
       sheet = spreadsheet.insertSheet("FinanceLogs");
       sheet.appendRow(desiredHeaders);
@@ -587,14 +587,7 @@ function logFinanceCommand(username, type, description, amount) {
       lastCol = sheet.getLastColumn();
     }
 
-    var currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-    // Ensure any missing desired headers exist (append at end)
-    for (var i = 0; i < desiredHeaders.length; i++) {
-      if (currentHeaders.indexOf(desiredHeaders[i]) === -1) {
-        sheet.getRange(1, sheet.getLastColumn() + 1).setValue(desiredHeaders[i]);
-        currentHeaders.push(desiredHeaders[i]);
-      }
-    }
+    var currentHeaders = ensureFinanceLogsHeaders(sheet);
 
     var category = classifyDescription(description);
 
@@ -709,23 +702,27 @@ function handleDocumentMessage(message) {
     // Decide by extension
     var lower = fileName.toLowerCase();
     if (lower.endsWith('.xlsx') || lower.endsWith('.xls') || doc.mime_type && doc.mime_type.indexOf('spreadsheet') !== -1) {
-      var added = 0;
+      var importResult = createEmptyImportResult();
       var looksLikeTech = /saoketk|saoke|tech/i.test(lower);
       if (looksLikeTech) {
-        added = importTechStatementBlobToFinanceLogs(blob, fileName);
+        importResult = importTechStatementBlobToFinanceLogs(blob, fileName);
       }
-      if (!added) {
-        added = importXlsxBlobToFinanceLogs(blob, fileName);
+      if (!importResult.inserted && !importResult.duplicateButToan && !importResult.invalidRows) {
+        importResult = importXlsxBlobToFinanceLogs(blob, fileName);
       }
 
-      if (added > 0) {
-        sendMessage(chatId, "✅ Đã import " + added + " giao dịch từ file spreadsheet.");
+      if (importResult.inserted > 0 || importResult.duplicateButToan > 0) {
+        sendMessage(chatId, formatImportResultMessage('✅ Kết quả import file spreadsheet:', importResult));
       } else {
         sendMessage(chatId, "⚠️ Chưa bóc tách được dữ liệu từ file spreadsheet. Nếu đây là sao kê Tech, hãy gửi `/saoke tech` kèm file hoặc reply lệnh đó rồi gửi file.");
       }
     } else if (lower.endsWith('.pdf') || doc.mime_type && doc.mime_type.indexOf('pdf') !== -1) {
-      var added2 = importPdfBlobToFinanceLogs(blob, fileName);
-      sendMessage(chatId, "✅ Đã import ~" + added2 + " giao dịch từ file PDF (kết quả ước lượng).");
+      var pdfImportResult = importPdfBlobToFinanceLogs(blob, fileName);
+      if (pdfImportResult.inserted > 0 || pdfImportResult.duplicateButToan > 0) {
+        sendMessage(chatId, formatImportResultMessage('✅ Kết quả import file PDF:', pdfImportResult));
+      } else {
+        sendMessage(chatId, "⚠️ Chưa bóc tách được giao dịch nào từ file PDF.");
+      }
     } else {
       sendMessage(chatId, "❌ Định dạng file không được hỗ trợ. Vui lòng gửi .xlsx hoặc .pdf");
     }
@@ -766,15 +763,15 @@ function handleSaokeCommand(chatId, userId, argsText, message) {
     var blob = UrlFetchApp.fetch(fileUrl).getBlob();
     blob.setName(fileName);
 
-    var added = 0;
+    var importResult = createEmptyImportResult();
     if (bank === 'tech') {
-      added = importTechStatementBlobToFinanceLogs(blob, fileName);
+      importResult = importTechStatementBlobToFinanceLogs(blob, fileName);
     } else {
-      added = importXlsxBlobToFinanceLogs(blob, fileName);
+      importResult = importXlsxBlobToFinanceLogs(blob, fileName);
     }
 
-    if (added > 0) {
-      sendMessage(chatId, '✅ Đã import ' + added + ' giao dịch từ sao kê ' + bank + ' vào FinanceLogs.');
+    if (importResult.inserted > 0 || importResult.duplicateButToan > 0) {
+      sendMessage(chatId, formatImportResultMessage('✅ Kết quả import sao kê ' + bank + ':', importResult));
     } else {
       sendMessage(chatId, '⚠️ Không bóc tách được giao dịch nào từ file ' + fileName + '. Hãy kiểm tra đúng mẫu sao kê rồi thử lại.');
     }
@@ -915,6 +912,142 @@ function parseBankDateToIso(value) {
   return isNaN(parsed) ? '' : new Date(parsed).toISOString();
 }
 
+function getFinanceLogsHeaders() {
+  return ['Thời gian', 'Username', 'Loại', 'Danh mục', 'Mô tả', 'Số tiền (VND)', 'Bút toán'];
+}
+
+function normalizeFinanceHeader(value) {
+  return String(value || '').toLowerCase().trim();
+}
+
+function ensureFinanceLogsHeaders(sheet) {
+  var desiredHeaders = getFinanceLogsHeaders();
+  var lastCol = sheet.getLastColumn();
+  if (lastCol === 0) {
+    sheet.appendRow(desiredHeaders);
+    return desiredHeaders.slice();
+  }
+
+  var currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  for (var i = 0; i < desiredHeaders.length; i++) {
+    if (currentHeaders.indexOf(desiredHeaders[i]) === -1) {
+      sheet.getRange(1, sheet.getLastColumn() + 1).setValue(desiredHeaders[i]);
+      currentHeaders.push(desiredHeaders[i]);
+    }
+  }
+  return currentHeaders;
+}
+
+function findFinanceHeaderIndex(headers, aliases) {
+  var aliasLookup = {};
+  for (var i = 0; i < aliases.length; i++) {
+    aliasLookup[normalizeFinanceHeader(aliases[i])] = true;
+  }
+
+  for (var j = 0; j < headers.length; j++) {
+    if (aliasLookup[normalizeFinanceHeader(headers[j])]) return j;
+  }
+
+  return -1;
+}
+
+function normalizeButToan(value) {
+  return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function createEmptyImportResult() {
+  return {
+    inserted: 0,
+    duplicateButToan: 0,
+    invalidRows: 0
+  };
+}
+
+function formatImportResultMessage(title, result) {
+  var lines = [title];
+  lines.push('Đã import: ' + (result.inserted || 0) + ' giao dịch');
+  lines.push('Trùng bút toán: ' + (result.duplicateButToan || 0) + ' giao dịch');
+  if (result.invalidRows) {
+    lines.push('Bỏ qua không hợp lệ: ' + result.invalidRows + ' giao dịch');
+  }
+  return lines.join('\n');
+}
+
+function buildButToanValue(row, source, amountValue) {
+  if (row && row.butToan) {
+    return String(row.butToan).trim();
+  }
+
+  var parts = [
+    String(source || '').trim(),
+    String(row && row.dateIso || '').trim(),
+    String(row && row.type || '').trim(),
+    isNaN(amountValue) ? '' : String(amountValue),
+    String(row && row.description || '').replace(/\s+/g, ' ').trim()
+  ];
+
+  return parts.join('|').replace(/^\|+|\|+$/g, '');
+}
+
+function getExistingButToanMap(sheet, headers) {
+  var result = {};
+  var butToanIdx = findFinanceHeaderIndex(headers, ['Bút toán', 'But toan']);
+  if (butToanIdx === -1) return result;
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return result;
+
+  var values = sheet.getRange(2, butToanIdx + 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < values.length; i++) {
+    var key = normalizeButToan(values[i][0]);
+    if (key) result[key] = true;
+  }
+  return result;
+}
+
+function backfillFinanceLogsButToan(sheet, headers) {
+  var butToanIdx = findFinanceHeaderIndex(headers, ['Bút toán', 'But toan']);
+  if (butToanIdx === -1) return;
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  var timeIdx = findFinanceHeaderIndex(headers, ['Thời gian', 'Thoi gian']);
+  var userIdx = findFinanceHeaderIndex(headers, ['Username']);
+  var typeIdx = findFinanceHeaderIndex(headers, ['Loại', 'Loai']);
+  var descIdx = findFinanceHeaderIndex(headers, ['Mô tả', 'Mo ta', 'Mota']);
+  var amtIdx = findFinanceHeaderIndex(headers, ['Số tiền (VND)', 'So tien (VND)', 'Số tiền', 'So tien']);
+  var rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  var updates = [];
+  var hasChanges = false;
+
+  for (var i = 0; i < rows.length; i++) {
+    var existing = String(rows[i][butToanIdx] || '').trim();
+    var source = userIdx >= 0 ? String(rows[i][userIdx] || '').trim() : '';
+    if (!isImportSourceUsername(source)) {
+      updates.push([existing]);
+      continue;
+    }
+
+    var generated = buildButToanValue({
+      dateIso: timeIdx >= 0 ? parseBankDateToIso(rows[i][timeIdx]) : '',
+      type: typeIdx >= 0 ? String(rows[i][typeIdx] || '').trim() : '',
+      description: descIdx >= 0 ? String(rows[i][descIdx] || '').trim() : ''
+    }, source, amtIdx >= 0 ? parseAmountString(rows[i][amtIdx]) : NaN);
+
+    updates.push([existing || generated]);
+    if (!existing && generated) hasChanges = true;
+  }
+
+  if (hasChanges) {
+    sheet.getRange(2, butToanIdx + 1, updates.length, 1).setValues(updates);
+  }
+}
+
+function isImportSourceUsername(username) {
+  return /^(saoke-|import$|pdf-import$)/i.test(String(username || '').trim());
+}
+
 function findFirstAmountInColumns(row, startCol1Based, endCol1Based) {
   for (var c = startCol1Based - 1; c <= endCol1Based - 1 && c < row.length; c++) {
     var value = row[c];
@@ -929,6 +1062,7 @@ function findFirstAmountInColumns(row, startCol1Based, endCol1Based) {
 
 function importTechStatementBlobToFinanceLogs(blob, filename) {
   try {
+    var result = createEmptyImportResult();
     var data;
     try {
       data = readFirstWorksheetRowsFromXlsxBlob(blob);
@@ -938,7 +1072,7 @@ function importTechStatementBlobToFinanceLogs(blob, filename) {
       data = ss.getSheets()[0].getDataRange().getValues();
     }
 
-    if (!data || data.length < 35) return 0;
+    if (!data || data.length < 35) return result;
 
     // Layout verified from sample `SaoKeTK_04042026_10042026.xlsx`
     // Row 33: headers, Row 34: opening balance, Row 35+: transactions.
@@ -947,8 +1081,9 @@ function importTechStatementBlobToFinanceLogs(blob, filename) {
       var row = data[r] || [];
       var dateRaw = row[1]; // C2: Ngày giao dịch
       var desc = String(row[24] || '').trim(); // C25: Diễn giải
+      var butToan = String(row[33] || '').trim(); // AH: Số bút toán / Transaction No
 
-      if (!dateRaw && !desc) continue;
+      if (!dateRaw && !desc && !butToan) continue;
 
       var debitInfo = findFirstAmountInColumns(row, 47, 52);
       var creditInfo = findFirstAmountInColumns(row, 53, 58);
@@ -963,7 +1098,13 @@ function importTechStatementBlobToFinanceLogs(blob, filename) {
         description: desc || 'Giao dịch sao kê Tech',
         amount: String(picked.raw),
         type: debitInfo ? 'Chi' : 'Thu',
-        username: 'saoke-tech'
+        username: 'saoke-tech',
+        butToan: buildButToanValue({
+          butToan: butToan,
+          dateIso: dateIso,
+          type: debitInfo ? 'Chi' : 'Thu',
+          description: desc || 'Giao dịch sao kê Tech'
+        }, 'saoke-tech', picked.amount)
       });
     }
 
@@ -971,12 +1112,13 @@ function importTechStatementBlobToFinanceLogs(blob, filename) {
     return appendTransactionsToFinanceLogs(rows, 'saoke-tech');
   } catch (err) {
     Logger.log('importTechStatementBlobToFinanceLogs error: ' + err.toString());
-    return 0;
+    return createEmptyImportResult();
   }
 }
 
 function importXlsxBlobToFinanceLogs(blob, filename) {
   try {
+    var result = createEmptyImportResult();
     // Try converting via Drive API (Advanced Drive service) if available
     var file;
     var ss;
@@ -998,21 +1140,31 @@ function importXlsxBlobToFinanceLogs(blob, filename) {
     if (descIdx === -1) descIdx = header.indexOf('mô tả');
     var amtIdx = header.indexOf('amount');
     if (amtIdx === -1) amtIdx = header.indexOf('số tiền (vnd)');
+    var dateIdx = findFinanceHeaderIndex(header, ['date', 'ngày', 'ngày giao dịch', 'thời gian']);
+    var typeIdx = findFinanceHeaderIndex(header, ['loại', 'type']);
+    var butToanIdx = findFinanceHeaderIndex(header, ['bút toán', 'but toan', 'reference', 'ref', 'transaction id']);
     var rows = [];
     for (var i = 1; i < data.length; i++) {
       var desc = (descIdx >=0) ? data[i][descIdx] : data[i][0];
       var amt = (amtIdx >=0) ? data[i][amtIdx] : '';
-      rows.push({description: desc, amount: String(amt)});
+      rows.push({
+        description: desc,
+        amount: String(amt),
+        dateIso: dateIdx >= 0 ? parseBankDateToIso(data[i][dateIdx]) : '',
+        type: typeIdx >= 0 ? String(data[i][typeIdx] || '').trim() : '',
+        butToan: butToanIdx >= 0 ? String(data[i][butToanIdx] || '').trim() : ''
+      });
     }
     return appendTransactionsToFinanceLogs(rows, 'import');
   } catch (err) {
     Logger.log('importXlsxBlobToFinanceLogs error: ' + err.toString());
-    return 0;
+    return createEmptyImportResult();
   }
 }
 
 function importPdfBlobToFinanceLogs(blob, filename) {
   try {
+    var result = createEmptyImportResult();
     // Try to convert PDF -> Google Doc using Drive API (convert:true)
     var docFile;
     var text = '';
@@ -1029,14 +1181,14 @@ function importPdfBlobToFinanceLogs(blob, filename) {
     }
 
     if (!text) {
-      return 0;
+      return result;
     }
 
     var txs = parseBankStatementText(text);
     return appendTransactionsToFinanceLogs(txs, 'pdf-import');
   } catch (err) {
     Logger.log('importPdfBlobToFinanceLogs error: ' + err.toString());
-    return 0;
+    return createEmptyImportResult();
   }
 }
 
@@ -1052,7 +1204,11 @@ function parseBankStatementText(text) {
       var amtRaw = m[0];
       var desc = l.replace(m[0],'').trim();
       if (desc.length > 200) desc = desc.slice(0,200);
-      txs.push({description: desc || 'auto-import', amount: amtRaw});
+      txs.push({
+        description: desc || 'auto-import',
+        amount: amtRaw,
+        butToan: buildButToanValue({ description: desc || 'auto-import' }, 'pdf-import', parseAmountString(amtRaw))
+      });
     }
   }
   return txs;
@@ -1060,24 +1216,41 @@ function parseBankStatementText(text) {
 
 function appendTransactionsToFinanceLogs(rows, source) {
   try {
-    if (!rows || rows.length === 0) return 0;
+    var result = createEmptyImportResult();
+    if (!rows || rows.length === 0) return result;
     var ss = SpreadsheetApp.openById(SHEET_ID);
     var sheet = ss.getSheetByName('FinanceLogs');
     if (!sheet) {
       sheet = ss.insertSheet('FinanceLogs');
-      sheet.appendRow(['Thời gian','Username','Loại','Danh mục','Mô tả','Số tiền (VND)']);
+      sheet.appendRow(getFinanceLogsHeaders());
     }
-    var lastCol = sheet.getLastColumn();
-    var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    var headers = ensureFinanceLogsHeaders(sheet);
+    backfillFinanceLogsButToan(sheet, headers);
+    var existingButToanMap = getExistingButToanMap(sheet, headers);
     var out = [];
     for (var i = 0; i < rows.length; i++) {
       var desc = rows[i].description || '';
       var amt = parseAmountString(rows[i].amount);
-      if (isNaN(amt)) continue;
+      if (isNaN(amt)) {
+        result.invalidRows++;
+        continue;
+      }
       var cat = classifyDescription(desc);
       var explicitType = rows[i].type || 'Chi';
       var explicitDateIso = rows[i].dateIso || new Date().toISOString();
       var username = rows[i].username || source;
+      var butToan = buildButToanValue({
+        butToan: rows[i].butToan,
+        dateIso: explicitDateIso,
+        type: explicitType,
+        description: desc
+      }, source, amt);
+      var butToanKey = normalizeButToan(butToan);
+      if (butToanKey && existingButToanMap[butToanKey]) {
+        result.duplicateButToan++;
+        continue;
+      }
+
       var outRow = [];
       for (var c = 0; c < headers.length; c++) {
         var h = headers[c];
@@ -1088,17 +1261,20 @@ function appendTransactionsToFinanceLogs(rows, source) {
         else if (hLower.indexOf('danh mục') !== -1 || hLower.indexOf('danh muc') !== -1) outRow.push(cat);
         else if (hLower.indexOf('mô tả') !== -1 || hLower.indexOf('mo ta') !== -1 || hLower.indexOf('mota') !== -1) outRow.push(desc);
         else if (hLower.indexOf('số tiền') !== -1 || hLower.indexOf('so tien') !== -1 || hLower.indexOf('sotien') !== -1) outRow.push(amt);
+        else if (hLower.indexOf('bút toán') !== -1 || hLower.indexOf('but toan') !== -1) outRow.push(butToan);
         else outRow.push('');
       }
       out.push(outRow);
+      if (butToanKey) existingButToanMap[butToanKey] = true;
     }
     if (out.length > 0) {
       sheet.getRange(sheet.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
     }
-    return out.length;
+    result.inserted = out.length;
+    return result;
   } catch (err) {
     Logger.log('appendTransactionsToFinanceLogs error: ' + err.toString());
-    return 0;
+    return createEmptyImportResult();
   }
 }
 
@@ -1271,10 +1447,11 @@ function createAnalysisSheet(range, focusType) {
 // Mẫu từ khóa/regex cho từng danh mục
 // Mẫu từ khóa cho từng danh mục (sử dụng so khớp chuỗi để tương thích Unicode)
 var CATEGORY_PATTERNS = {
+  "đầu tư": ["lợi nhuận","loi nhuan","sinh lời","sinh loi","quyền mua","quyen mua","nghia vu thanh toan ck","nghĩa vụ thanh toán ck","tra lai so du","trả lãi số dư"],
   "lương thưởng": ["lương","thưởng","salary","bonus","payroll","nhận","chuyển khoản"],
   "ăn uống": ["nhà hàng","ăn uống","ăn tối","ăn trưa","ăn sáng","ăn","cơm","quán","cafe","cà phê","trà sữa","phở","bún","ăn vặt","ăn nhẹ","siêu thị","grocery","chợ"],
   "xăng xe": ["gửi xe","xăng","đổ xăng","bơm xăng","nhien lieu","nhiên liệu","petrol","diesel","gas","xăng xe","đổ","rút xăng","thuê xe","xe ôm","grab","taxi","xe máy","xe tải"],
-  "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet"],
+  "nhà cửa": ["nhà","thuê","tiền nhà","điện","nước","internet","phòng","điện nước","wifi","tiền điện","tiền nước","tiền internet","tien phong"],
   "được cho": ["được"],
   "thư giãn": ["du lịch","du lich","tham quan","vui chơi","khách sạn","khach san","resort","spa","công viên","cong vien","tour","bảo tàng","bao tang"],
   "quan hệ": ["mừng","mung","đám","hiếu","hỉ","gửi","mừng cưới","mung cuoi","đám cưới","đám hỏi","đám tang","biếu","bieu","tặng","tang","cho","ủng hộ","ung ho","ủng","ung"]
