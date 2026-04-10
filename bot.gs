@@ -167,6 +167,63 @@ function handleTelegramMessage(message) {
     return;
   }
 
+  // If this is a forwarded message with text, try to detect a time token and auto-schedule.
+  // If no clear time found, save pending reminder and ask user to reply with a specific time.
+  try {
+    if ((message.forward_date || message.forward_from || message.forward_from_chat) && message.text) {
+      var ftext = String(message.text || '').trim();
+      // time token regex: matches HH:MM, H:MM, Hh, HhMM, e.g. 20h, 8:30, 13h20
+      var timeTokenRe = /([0-9]{1,2}(?::[0-9]{2})?|[0-9]{1,2}h[0-9]{0,2})/i;
+      var timeMatch = ftext.match(timeTokenRe);
+      if (timeMatch) {
+        // build args for handleNhacNhoCommand: e.g. "20h ăn tối"
+        var idx = ftext.indexOf(timeMatch[0]);
+        var after = ftext.slice(idx + timeMatch[0].length).trim();
+        var argsForNhac = timeMatch[0] + (after ? ' ' + after : ' ' + ftext);
+        handleNhacNhoCommand(chatId, userId, argsForNhac);
+        return;
+      } else {
+        // no explicit numeric time found -> ask user to reply with specific time
+        var props = PropertiesService.getScriptProperties();
+        props.setProperty('PENDING_REMINDER_' + chatId, ftext);
+        var preview = (ftext.length > 200) ? (ftext.slice(0,200) + '...') : ftext;
+        var ask = 'Tôi thấy bạn đã forward một tin nhắn:\n"' + preview + '"\n\n' +
+          'Tuy nhiên tôi không tìm thấy giờ cụ thể trong nội dung. Vui lòng trả lời tin nhắn này với thời gian bạn muốn (ví dụ: "20h", "15:30" hoặc "in 20m"). Tôi sẽ dùng nội dung bạn forward làm lời nhắc.';
+        sendMessage(chatId, ask);
+        return;
+      }
+    }
+  } catch (e) {
+    Logger.log('forward-time-detect error: ' + e.toString());
+  }
+
+  // If user replied with a time and we have a pending forwarded message, schedule it
+  try {
+    if (text && !text.startsWith('/') ) {
+      var pprops = PropertiesService.getScriptProperties();
+      var pending = pprops.getProperty('PENDING_REMINDER_' + chatId);
+      if (pending) {
+        // If the forwarded text mentions 'mai' (tomorrow), inject it right after the time
+        var pendingLower = String(pending || '').toLowerCase();
+        var hasMai = /\b(ngày\s+mai|mai)\b/i.test(pendingLower);
+        var cleanedPending = pending.replace(/\b(ngày\s+mai|mai)\b/ig, '').trim();
+        var combinedArgs;
+        if (hasMai) {
+          // place 'mai' immediately after time so parser recognizes it as day token
+          combinedArgs = text + ' mai ' + (cleanedPending || '');
+        } else {
+          combinedArgs = text + ' ' + pending;
+        }
+        // clear pending before scheduling to avoid duplicates
+        pprops.deleteProperty('PENDING_REMINDER_' + chatId);
+        handleNhacNhoCommand(chatId, userId, combinedArgs.trim());
+        return;
+      }
+    }
+  } catch (e) {
+    Logger.log('pending-reply-handler error: ' + e.toString());
+  }
+
   // Loại bỏ tên bot khỏi câu lệnh (ví dụ: /log@BOT_NAME -> /log)
   if (typeof BOT_NAME !== 'undefined' && BOT_NAME) {
     if (text.startsWith("/") && text.includes(BOT_NAME)) {
