@@ -1542,6 +1542,9 @@ function classifyDescription(text) {
   s = s.replace(/[.,;:!"'()\[\]\/\\-]/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
 
+  // Ưu tiên các cụm tiền phòng/thuê phòng để tránh bắt nhầm từ "tang" trong địa chỉ tầng.
+  if (/\b(ti[eề]n\s+ph[oò]ng|thu[eê]\s+ph[oò]ng|ph[oò]ng\s+tr[oọ])\b/.test(s)) return 'nhà cửa';
+
   // Prioritize explicit relationship keywords (whole-word match).
   // Include both accented and unaccented variants to improve matching from different sources.
   var rel = s.match(/\b(mừng|mung|biếu|bieu|tặng|tang|cho|ủng\s*hộ|ung\s*ho|ủng|ung)\b/);
