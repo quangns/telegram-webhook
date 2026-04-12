@@ -203,81 +203,180 @@ function handleTelegramMessage(message) {
       }
 
       var formattedForward = '[' + senderDisplay + ' nhắn]: "' + ftext + '"';
-      // time token regex: matches HH:MM, H:MM, Hh, HhMM, e.g. 20h, 8:30, 13h20
-      var timeTokenRe = /([0-9]{1,2}(?::[0-9]{2})?|[0-9]{1,2}h[0-9]{0,2})/i;
+      // time token regex: must have explicit time indicator (: or h) to avoid matching bare digits
+      var timeTokenRe = /\b([0-9]{1,2}(?::[0-9]{2})|[0-9]{1,2}h[0-9]{0,2})\b/i;
       var timeMatch = ftext.match(timeTokenRe);
-      if (timeMatch) {
-        // build args for handleNhacNhoCommand: e.g. "20h ăn tối"
-        var idx = ftext.indexOf(timeMatch[0]);
-        var argsForNhac = timeMatch[0] + ' ' + formattedForward;
+
+      // day token detection
+      var dateTokenRe = /\b(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\b/i;
+
+      var hasDayToken = dateTokenRe.test(ftext);
+      var hasTimeToken = timeMatch !== null;
+
+      // If has explicit time, schedule immediately
+      if (hasTimeToken) {
+        var argsForNhac;
+        if (hasDayToken) {
+          var dayMatch = ftext.match(dateTokenRe);
+          var dayToken = dayMatch ? dayMatch[0] : 'mai';
+          var cleanedFtext = ftext.replace(dateTokenRe, '').trim();
+          var formattedClean = '[' + senderDisplay + ' nhắn]: "' + cleanedFtext + '"';
+          argsForNhac = timeMatch[0] + ' ' + dayToken + ' ' + formattedClean;
+        } else {
+          argsForNhac = timeMatch[0] + ' ' + formattedForward;
+        }
         handleNhacNhoCommand(chatId, userId, argsForNhac);
         return;
-      } else {
-        // no explicit numeric time found -> keep first forwarded message only, then ask for a time
-        var props = PropertiesService.getScriptProperties();
-        var pendingKey = 'PENDING_REMINDER_' + chatId;
-        var existingPendingRaw = props.getProperty(pendingKey);
-        if (!existingPendingRaw) {
-          var pendingObj = {
+      }
+
+      // No explicit time - handle day-only or action-only
+      var props = PropertiesService.getScriptProperties();
+      var pendingKey = 'PENDING_REMINDER_' + chatId;
+      var existingPendingRaw = props.getProperty(pendingKey);
+
+      var pendingArray = [];
+      if (existingPendingRaw) {
+        try {
+          var existingData = JSON.parse(existingPendingRaw);
+          if (existingData.forwards && Array.isArray(existingData.forwards)) {
+            pendingArray = existingData.forwards;
+          }
+        } catch (e) {
+          Logger.log('parse-pending error: ' + e.toString());
+        }
+      }
+
+      // If this forward has day token but no time, check if we have previous pending action
+      if (hasDayToken) {
+        // This forward provides the day info
+        var dayMatch = ftext.match(dateTokenRe);
+        var dayToken = dayMatch ? dayMatch[0] : '';
+        var dayOnlyMsg = ftext.replace(dateTokenRe, '').trim();
+
+        if (pendingArray.length > 0) {
+          // We have previous action(s), now apply this day token to them
+          for (var i = 0; i < pendingArray.length; i++) {
+            pendingArray[i].dayToken = dayToken;
+          }
+          // Don't add this message as a new forward since it's just providing day info
+        } else {
+          // No previous action, store this day-only message
+          pendingArray.push({
             sender: senderDisplay,
             text: ftext,
             formatted: formattedForward,
+            dayToken: dayToken,
             createdAt: new Date().toISOString()
-          };
-          props.setProperty(pendingKey, JSON.stringify(pendingObj));
+          });
         }
 
-        var pendingRaw = props.getProperty(pendingKey);
-        var pendingTextForAsk = ftext;
-        try {
-          var parsedPending = pendingRaw ? JSON.parse(pendingRaw) : null;
-          if (parsedPending && parsedPending.formatted) {
-            pendingTextForAsk = String(parsedPending.formatted);
+        // Ask for specific time
+        var summary = '📋 Nhắc nhở:\n';
+        for (var pi = 0; pi < pendingArray.length; pi++) {
+          var item = pendingArray[pi];
+          var displayText = (item.text || item.formatted || '').replace(dateTokenRe, '').trim();
+          if (!displayText && item.formatted) {
+            displayText = item.formatted;
           }
-        } catch (pe) {
-          pendingTextForAsk = String(pendingRaw || ftext);
+          summary += (pi + 1) + '. ' + item.sender + ' nhắn: ' + displayText + '\n';
         }
+        summary += '📅 Ngày: ' + dayToken + '\n\n⏰ Mấy giờ bạn muốn nhắc?';
+        sendMessage(chatId, summary);
 
-        var preview = (pendingTextForAsk.length > 250) ? (pendingTextForAsk.slice(0, 250) + '...') : pendingTextForAsk;
-        var ask = 'Tôi đã ghi nhận tin forward đầu tiên để nhắc:\n' + preview + '\n\n' +
-          'Vui lòng trả lời với thời gian bạn muốn (ví dụ: "20h", "15:30" hoặc "in 20m").';
-        sendMessage(chatId, ask);
-        return;
+      } else {
+        // No day token in this forward - just store the action
+        pendingArray.push({
+          sender: senderDisplay,
+          text: ftext,
+          formatted: formattedForward,
+          dayToken: null,
+          createdAt: new Date().toISOString()
+        });
+        // Don't ask yet - wait for next forward that might have day info
+        Logger.log('stored-forward-action: ' + senderDisplay + ' - ' + ftext);
       }
+
+      // Save updated pending array
+      var pendingData = {
+        forwards: pendingArray,
+        updatedAt: new Date().toISOString()
+      };
+      props.setProperty(pendingKey, JSON.stringify(pendingData));
+      return;
     }
   } catch (e) {
     Logger.log('forward-time-detect error: ' + e.toString());
   }
 
-  // If user replied with a time and we have a pending forwarded message, schedule it
+  // If user replied with a time and we have pending forwarded messages, schedule all of them
   try {
-    if (text && !text.startsWith('/') ) {
+    if (text && !text.startsWith('/')) {
       var pprops = PropertiesService.getScriptProperties();
       var pendingRaw2 = pprops.getProperty('PENDING_REMINDER_' + chatId);
       if (pendingRaw2) {
-        var pending = '';
+        var pendingArray = [];
+        var dayTokenFromPending = null;
+
         try {
-          var pendingObj2 = JSON.parse(pendingRaw2);
-          pending = String((pendingObj2 && pendingObj2.formatted) ? pendingObj2.formatted : pendingRaw2);
+          var pendingData = JSON.parse(pendingRaw2);
+          if (pendingData.forwards && Array.isArray(pendingData.forwards)) {
+            pendingArray = pendingData.forwards;
+            // Get day token from first forward that has it
+            for (var pi = 0; pi < pendingArray.length; pi++) {
+              if (pendingArray[pi].dayToken) {
+                dayTokenFromPending = pendingArray[pi].dayToken;
+                break;
+              }
+            }
+          }
         } catch (pErr) {
-          pending = String(pendingRaw2);
+          Logger.log('parse-pending error: ' + pErr.toString());
         }
 
-        // If the forwarded text mentions 'mai' (tomorrow), inject it right after the time
-        var pendingLower = String(pending || '').toLowerCase();
-        var hasMai = /\b(ngày\s+mai|mai)\b/i.test(pendingLower);
-        var cleanedPending = pending.replace(/\b(ngày\s+mai|mai)\b/ig, '').trim();
-        var combinedArgs;
-        if (hasMai) {
-          // place 'mai' immediately after time so parser recognizes it as day token
-          combinedArgs = text + ' mai ' + (cleanedPending || '');
-        } else {
-          combinedArgs = text + ' ' + pending;
+        if (pendingArray.length > 0) {
+          // Schedule reminder for each pending forward
+          var successCount = 0;
+          var fullDayTokenRe = /\b(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\b/i;
+
+          for (var pi = 0; pi < pendingArray.length; pi++) {
+            var item = pendingArray[pi];
+            var sender = item.sender || 'unknown';
+            var msgText = item.text || '';
+            
+            // Extract action (remove any day tokens that might be in the text)
+            var action = msgText.replace(fullDayTokenRe, '').trim();
+            
+            // Format as: "[username] đã nhắn: [action]"
+            var reminderMsg = sender + ' đã nhắn: ' + action;
+
+            // Build the combined args for scheduling
+            var combinedArgs;
+            if (dayTokenFromPending) {
+              combinedArgs = text + ' ' + dayTokenFromPending + ' ' + reminderMsg;
+            } else {
+              combinedArgs = text + ' ' + reminderMsg;
+            }
+
+            try {
+              handleNhacNhoCommand(chatId, userId, combinedArgs.trim());
+              successCount++;
+            } catch (schedErr) {
+              Logger.log('schedule-pending-item error: ' + schedErr.toString());
+            }
+          }
+
+          // Clear pending after scheduling
+          pprops.deleteProperty('PENDING_REMINDER_' + chatId);
+
+          if (successCount === pendingArray.length) {
+            sendMessage(chatId, '✅ Đã đặt nhắc cho ' + successCount + ' tin nhắn!');
+          } else if (successCount > 0) {
+            sendMessage(chatId, '⚠️ Đặt nhắc được ' + successCount + ' / ' + pendingArray.length + ' tin nhắn.');
+          } else {
+            sendMessage(chatId, '❌ Lỗi khi đặt nhắc. Vui lòng thử lại.');
+          }
+          return;
         }
-        // clear pending before scheduling to avoid duplicates
-        pprops.deleteProperty('PENDING_REMINDER_' + chatId);
-        handleNhacNhoCommand(chatId, userId, combinedArgs.trim());
-        return;
       }
     }
   } catch (e) {
@@ -1710,6 +1809,168 @@ function reclassifyFinanceLogs() {
   }
 }
 
+/**
+ * Compute a date from a Vietnamese day token (e.g., "thứ 3", "thứ 2 tuần tới", "đầu tháng", etc.).
+ * Returns a Date object set to the specified hour and minute on that day.
+ * 
+ * Logic:
+ * - "thứ X" (Tuesday, etc.): If today is before weekday X, use this week's X; else next week's X
+ * - "thứ X tuần tới" (next week): Add 7 days to the computed weekday
+ * - "thứ X tuần sau": Same as tuần tới
+ * - "đầu tháng": First day of this month; if date passed, next month
+ * - "đầu tháng sau": First day of next month
+ * - "cuối tháng": Last day of current month
+ * - "tháng sau": First day of next month (or can be interpreted as last day of current)
+ * - "ngày mai" / "mai": Tomorrow
+ * - Date formats: "dd/mm", "dd-mm", "yyyy-mm-dd"
+ */
+function computeDateFromDayToken(dayTokenStr, hour, minute) {
+  if (!dayTokenStr) return null;
+  var s = String(dayTokenStr).trim().toLowerCase().replace(/\s+/g, ' ');
+  var now = new Date();
+  var baseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour || 0, minute || 0, 0);
+  
+  // Handle explicit dates: dd/mm, dd-mm, yyyy-mm-dd
+  var explicitDateMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?$/);
+  if (explicitDateMatch) {
+    var day = parseInt(explicitDateMatch[1], 10);
+    var month = parseInt(explicitDateMatch[2], 10);
+    var year = explicitDateMatch[3] ? parseInt(explicitDateMatch[3], 10) : now.getFullYear();
+    if (year < 100) year += 2000; // assume 21st century for 2-digit years
+    var candidate = new Date(year, month - 1, day, hour || 0, minute || 0, 0);
+    if (isNaN(candidate.getTime())) return null;
+    if (candidate.getTime() < now.getTime()) {
+      // Date already passed; push to next year
+      candidate.setFullYear(candidate.getFullYear() + 1);
+    }
+    return candidate;
+  }
+  
+  // Handle ISO format: yyyy-mm-dd
+  var isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    var year = parseInt(isoMatch[1], 10);
+    var month = parseInt(isoMatch[2], 10);
+    var day = parseInt(isoMatch[3], 10);
+    var candidate = new Date(year, month - 1, day, hour || 0, minute || 0, 0);
+    if (isNaN(candidate.getTime())) return null;
+    if (candidate.getTime() < now.getTime()) {
+      candidate.setFullYear(candidate.getFullYear() + 1);
+    }
+    return candidate;
+  }
+  
+  // Handle "ngày mai" / "mai"
+  if (s === 'ngày mai' || s === 'mai') {
+    var tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hour || 0, minute || 0, 0);
+    return tomorrow;
+  }
+  
+  // Handle "đầu tháng"
+  if (s === 'đầu tháng' || s === 'dau thang') {
+    var firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, hour || 0, minute || 0, 0);
+    if (firstOfMonth.getTime() < now.getTime()) {
+      // Already past the first of this month; move to next month
+      firstOfMonth.setMonth(firstOfMonth.getMonth() + 1);
+    }
+    return firstOfMonth;
+  }
+  
+  // Handle "đầu tháng sau"
+  if (s === 'đầu tháng sau' || s === 'dau thang sau') {
+    var firstOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, hour || 0, minute || 0, 0);
+    return firstOfNextMonth;
+  }
+  
+  // Handle "cuối tháng"
+  if (s === 'cuối tháng' || s === 'cuoi thang') {
+    // Last day of current month
+    var lastOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, hour || 0, minute || 0, 0);
+    if (lastOfMonth.getTime() < now.getTime()) {
+      // Already past last day of this month; move to last day of next month
+      lastOfMonth = new Date(now.getFullYear(), now.getMonth() + 2, 0, hour || 0, minute || 0, 0);
+    }
+    return lastOfMonth;
+  }
+  
+  // Handle "tháng sau" (typically first day of next month, but could also mean last day of current)
+  if (s === 'tháng sau' || s === 'thang sau') {
+    var firstOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, hour || 0, minute || 0, 0);
+    return firstOfNextMonth;
+  }
+  
+  // Handle "tháng này" (first day of current month if not passed, else next month)
+  if (s === 'tháng này' || s === 'thang nay') {
+    var firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, hour || 0, minute || 0, 0);
+    if (firstOfMonth.getTime() < now.getTime()) {
+      firstOfMonth.setMonth(firstOfMonth.getMonth() + 1);
+    }
+    return firstOfMonth;
+  }
+  
+  // Handle weekday tokens: thứ X where X can be numeric (2-7) or spelled out
+  // Map spelled-out weekdays to numbers (Note: Vietnamese uses thứ 2 = Monday through thứ 7 = Saturday, Chủ nhật = Sunday)
+  // JS getDay(): 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
+  // Vietnamese: thứ 2 = Mon (JS 1), thứ 3 = Tue (JS 2), ..., thứ 7 = Sat (JS 6), chủ nhật = Sun (JS 0)
+  var weekdayNameMap = {
+    'thứ hai': 1, 'thứ ba': 2, 'thứ bốn': 3, 'thứ năm': 4, 'thứ sáu': 5, 'thứ bảy': 6,
+    'thu hai': 1, 'thu ba': 2, 'thu bon': 3, 'thu nam': 4, 'thu sau': 5, 'thu bay': 6,
+    'chủ nhật': 0, 'chu nhat': 0, 'cn': 0
+  };
+  
+  var weekdayNum = null;
+  var hasWeekModifier = false;
+  var weekOffset = 0;
+  
+  // Check for "thứ X" (numeric)
+  var numericMatch = s.match(/^thứ\s*(\d+)(?:\s+(?:tuần\s*(?:tới|sau)))?/);
+  if (numericMatch) {
+    weekdayNum = parseInt(numericMatch[1], 10);
+    if (weekdayNum >= 2 && weekdayNum <= 7) {
+      weekdayNum = weekdayNum === 7 ? 6 : weekdayNum - 1;  // Convert VN format to JS format
+    } else {
+      return null; // Invalid weekday
+    }
+    hasWeekModifier = true;
+  } else {
+    // Check for named weekdays
+    for (var dayName in weekdayNameMap) {
+      if (s.indexOf(dayName) !== -1) {
+        weekdayNum = weekdayNameMap[dayName];
+        hasWeekModifier = true;
+        break;
+      }
+    }
+  }
+  
+  if (weekdayNum !== null && hasWeekModifier) {
+    // Check for "tuần tới" or "tuần sau"
+    if (/tuần\s*(?:tới|sau)/.test(s)) {
+      weekOffset = 1;
+    }
+    
+    // Compute next occurrence of weekdayNum
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    var currentWeekday = today.getDay();
+    
+    var daysAhead = weekdayNum - currentWeekday;
+    if (daysAhead <= 0) {  // Target day already happened this week or is today
+      daysAhead += 7;
+    }
+    
+    // Add week offset if specified
+    daysAhead += weekOffset * 7;
+    
+    var candidate = new Date(today);
+    candidate.setDate(candidate.getDate() + daysAhead);
+    candidate.setHours(hour || 0, minute || 0, 0, 0);
+    return candidate;
+  }
+  
+  return null;
+}
+
 // ============================================
 // Reminders: `/nhacnho` command + scheduler
 // ============================================
@@ -1779,7 +2040,29 @@ function handleNhacNhoCommand(chatId, userId, argsText) {
       }
     }
 
-    // 3) Time-only / Vietnamese short form: accept "8h", "8:30", "13h20" (with or without colon), optionally with 'sáng/chiều' and optional 'ngày mai'
+    // 3) Time + day token pattern: "20h thứ 3 message" or "15:30 thứ 7 message" - CHECK FIRST for specificity
+    // Must be checked before the generic "time + period + optional day" pattern
+    if (!whenDate) {
+      var dayTokenPattern = /^([0-9]{1,2})(?::([0-9]{2})|h([0-9]{1,2})?)?\s+(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\s+([\s\S]+)$/i;
+      m = rest.match(dayTokenPattern);
+      if (m) {
+        var hourDT = parseInt(m[1], 10);
+        var minuteDT = 0;
+        if (m[2]) minuteDT = parseInt(m[2], 10);
+        else if (typeof m[3] !== 'undefined' && m[3] !== '') minuteDT = parseInt(m[3], 10);
+        var dayTokenMatch = (m[4] || '').trim();
+        messageText = (m[5] || '').trim();
+        
+        // Compute date from day token
+        var computedDate = computeDateFromDayToken(dayTokenMatch, hourDT, minuteDT);
+        if (computedDate && !isNaN(computedDate.getTime())) {
+          whenDate = computedDate;
+          parsedType = 'timeWithDay';
+        }
+      }
+    }
+
+    // 3b) Time-only / Vietnamese short form: accept "8h", "8:30", "13h20" (with or without colon), optionally with 'sáng/chiều' and optional 'ngày mai'
     // This will correctly match "20h ăn tối" as 20:00 today (or next day if already passed).
     if (!whenDate) {
       m = rest.match(/^([0-9]{1,2})(?::([0-9]{2})|h([0-9]{1,2})?)?\s*(sáng|chiều|tối|sang|chieu|toi)?\s*(ngày mai|mai)?\s+([\s\S]+)$/i);
