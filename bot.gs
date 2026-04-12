@@ -191,23 +191,56 @@ function handleTelegramMessage(message) {
   try {
     if ((message.forward_date || message.forward_from || message.forward_from_chat) && message.text) {
       var ftext = String(message.text || '').trim();
+      var senderDisplay = 'người nhắn';
+      if (message.forward_from) {
+        var ff = message.forward_from;
+        var fullName = [ff.first_name || '', ff.last_name || ''].join(' ').replace(/\s+/g, ' ').trim();
+        senderDisplay = fullName || ff.username || senderDisplay;
+      } else if (message.forward_sender_name) {
+        senderDisplay = String(message.forward_sender_name || '').trim() || senderDisplay;
+      } else if (message.forward_from_chat && message.forward_from_chat.title) {
+        senderDisplay = String(message.forward_from_chat.title || '').trim() || senderDisplay;
+      }
+
+      var formattedForward = '[' + senderDisplay + ' nhắn]: "' + ftext + '"';
       // time token regex: matches HH:MM, H:MM, Hh, HhMM, e.g. 20h, 8:30, 13h20
       var timeTokenRe = /([0-9]{1,2}(?::[0-9]{2})?|[0-9]{1,2}h[0-9]{0,2})/i;
       var timeMatch = ftext.match(timeTokenRe);
       if (timeMatch) {
         // build args for handleNhacNhoCommand: e.g. "20h ăn tối"
         var idx = ftext.indexOf(timeMatch[0]);
-        var after = ftext.slice(idx + timeMatch[0].length).trim();
-        var argsForNhac = timeMatch[0] + (after ? ' ' + after : ' ' + ftext);
+        var argsForNhac = timeMatch[0] + ' ' + formattedForward;
         handleNhacNhoCommand(chatId, userId, argsForNhac);
         return;
       } else {
-        // no explicit numeric time found -> ask user to reply with specific time
+        // no explicit numeric time found -> keep first forwarded message only, then ask for a time
         var props = PropertiesService.getScriptProperties();
-        props.setProperty('PENDING_REMINDER_' + chatId, ftext);
-        var preview = (ftext.length > 200) ? (ftext.slice(0,200) + '...') : ftext;
-        var ask = 'Tôi thấy bạn đã forward một tin nhắn:\n"' + preview + '"\n\n' +
-          'Tuy nhiên tôi không tìm thấy giờ cụ thể trong nội dung. Vui lòng trả lời tin nhắn này với thời gian bạn muốn (ví dụ: "20h", "15:30" hoặc "in 20m"). Tôi sẽ dùng nội dung bạn forward làm lời nhắc.';
+        var pendingKey = 'PENDING_REMINDER_' + chatId;
+        var existingPendingRaw = props.getProperty(pendingKey);
+        if (!existingPendingRaw) {
+          var pendingObj = {
+            sender: senderDisplay,
+            text: ftext,
+            formatted: formattedForward,
+            createdAt: new Date().toISOString()
+          };
+          props.setProperty(pendingKey, JSON.stringify(pendingObj));
+        }
+
+        var pendingRaw = props.getProperty(pendingKey);
+        var pendingTextForAsk = ftext;
+        try {
+          var parsedPending = pendingRaw ? JSON.parse(pendingRaw) : null;
+          if (parsedPending && parsedPending.formatted) {
+            pendingTextForAsk = String(parsedPending.formatted);
+          }
+        } catch (pe) {
+          pendingTextForAsk = String(pendingRaw || ftext);
+        }
+
+        var preview = (pendingTextForAsk.length > 250) ? (pendingTextForAsk.slice(0, 250) + '...') : pendingTextForAsk;
+        var ask = 'Tôi đã ghi nhận tin forward đầu tiên để nhắc:\n' + preview + '\n\n' +
+          'Vui lòng trả lời với thời gian bạn muốn (ví dụ: "20h", "15:30" hoặc "in 20m").';
         sendMessage(chatId, ask);
         return;
       }
@@ -220,8 +253,16 @@ function handleTelegramMessage(message) {
   try {
     if (text && !text.startsWith('/') ) {
       var pprops = PropertiesService.getScriptProperties();
-      var pending = pprops.getProperty('PENDING_REMINDER_' + chatId);
-      if (pending) {
+      var pendingRaw2 = pprops.getProperty('PENDING_REMINDER_' + chatId);
+      if (pendingRaw2) {
+        var pending = '';
+        try {
+          var pendingObj2 = JSON.parse(pendingRaw2);
+          pending = String((pendingObj2 && pendingObj2.formatted) ? pendingObj2.formatted : pendingRaw2);
+        } catch (pErr) {
+          pending = String(pendingRaw2);
+        }
+
         // If the forwarded text mentions 'mai' (tomorrow), inject it right after the time
         var pendingLower = String(pending || '').toLowerCase();
         var hasMai = /\b(ngày\s+mai|mai)\b/i.test(pendingLower);

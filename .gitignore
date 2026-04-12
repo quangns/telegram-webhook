@@ -1,0 +1,11 @@
+# Ignore TODO files
+TODO
+TODO.*
+TODO.md
+**/TODO
+**/TODO.*
+**/TODO.md
+
+# Common OS files (optional)
+.DS_Store
+Thumbs.db
