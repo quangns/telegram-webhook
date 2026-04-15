@@ -7,6 +7,7 @@
 var COMMANDS = [
   {cmd: "/start", usage: "/start", desc: "Bắt đầu"},
   {cmd: "/help", usage: "/help", desc: "Xem hướng dẫn"},
+  {cmd: "/tinngay", usage: "/tinngay [từ khóa]", desc: "Tổng hợp tin tức Vietstock hằng ngày (ví dụ: /tinngay điện vận tải)"},
   {cmd: "/nhacnho", usage: "/nhacnho ...", desc: "Đặt nhắc (ví dụ: /nhacnho 8h sáng ngày mai Gặp khách)"},
   {cmd: "/log", usage: "/log [thu] [mô tả] [số tiền]", desc: "Ghi thu chi cá nhân"},
   {cmd: "/analyze", usage: "/analyze [1w|1m|tháng N]", desc: "Phân tích thu/chi theo danh mục trong khung thời gian (ví dụ: 1w, 1m, tháng 3)"},
@@ -413,7 +414,16 @@ function handleTelegramMessage(message) {
       sendMessage(chatId, '❌ Lỗi khi hiển thị trợ giúp.');
     }
   }
-    else if (text.startsWith("/analyze")) {
+  else if (text.startsWith("/tinngay")) {
+    try {
+      var newsArgsText = text.replace(/^\/tinngay\b/i, '').trim();
+      handleTinNgayCommand(chatId, newsArgsText);
+    } catch (e) {
+      Logger.log('handle /tinngay error: ' + e.toString());
+      sendMessage(chatId, '❌ Lỗi khi tổng hợp tin tức.');
+    }
+  }
+  else if (text.startsWith("/analyze")) {
         try {
           var parts = text.split(/\s+/);
           var rawArg = parts.slice(1).join(' ').trim();
@@ -604,6 +614,10 @@ function handleCallbackQuery(callbackQuery) {
     editMessage(chatId, messageId, status);
     answerCallbackQuery(callbackId, "Xem trạng thái", false);
   }
+  else if (data === "btn_tinngay") {
+    answerCallbackQuery(callbackId, "Đang tạo bản tin hôm nay...", false);
+    handleTinNgayCommand(chatId, "");
+  }
   else if (data.startsWith("btn_")) {
     answerCallbackQuery(callbackId, `Bạn chọn: ${data}`, false);
   }
@@ -779,6 +793,9 @@ function getMainKeyboard() {
         { text: "✅ Trạng thái", callback_data: "btn_status" }
       ],
       [
+        { text: "📰 Tin hôm nay", callback_data: "btn_tinngay" }
+      ],
+      [
         { text: "📖 Hướng dẫn", url: "https://example.com" }
       ]
     ]
@@ -823,6 +840,436 @@ function sendTestMessage() {
   const testMessage = `🧪 Test message từ Google Apps Script\nThời gian: ${new Date().toLocaleString('vi-VN')}`;
   sendMessage(CHAT_ID, testMessage);
   Logger.log("Test message sent!");
+}
+
+function handleTinNgayCommand(chatId, argsText) {
+  try {
+    var rawArgs = String(argsText || '').trim();
+    var focusMode = rawArgs.length > 0;
+    var sections = focusMode ? collectFocusedTinNgay(rawArgs) : buildTinNgaySections([]);
+    var messages = [];
+
+    if (focusMode) {
+      messages.push('🔎 <b>Tin theo chủ đề</b>');
+      messages.push('Quan tâm: ' + rawArgs);
+      messages.push('Ngày: ' + new Date().toLocaleString('vi-VN'));
+      messages.push('');
+      messages.push('• Chỉ giữ lại các tin có liên quan trực tiếp đến chủ đề bạn nhập.');
+      messages.push('');
+    } else {
+      var marketSections24h = collect24hMarketHighlights([]);
+      messages.push('📰 <b>Tổng hợp tin chứng khoán hôm nay</b>');
+      messages.push('Ngày: ' + new Date().toLocaleString('vi-VN'));
+      messages.push('');
+      messages.push('📊 <b>Thị trường nhanh</b>');
+      messages.push('• Dùng /tinngay giá vàng, /tinngay xăng dầu, /tinngay thế giới để lọc đúng chủ đề.');
+      messages.push('• Bản tin này tổng hợp từ headline và nhóm nội dung trên Vietstock + 24h.');
+      messages.push('');
+
+      for (var si = 0; si < sections.length; si++) {
+        var sec = sections[si];
+        if (!sec.items || sec.items.length === 0) continue;
+        messages.push('🔹 <b>' + escapeHtml(sec.title) + '</b>');
+        for (var ii = 0; ii < sec.items.length; ii++) {
+          var item = sec.items[ii];
+          messages.push((ii + 1) + '. ' + escapeHtml(item.title) + (item.url ? '\n   ' + item.url : ''));
+        }
+        messages.push('');
+      }
+
+      if (marketSections24h.length > 0) {
+        messages.push('🌐 <b>Biến động 24h</b>');
+        messages.push('');
+        for (var ms = 0; ms < marketSections24h.length; ms++) {
+          var sec24 = marketSections24h[ms];
+          if (!sec24.items || sec24.items.length === 0) continue;
+          messages.push('🔸 <b>' + escapeHtml(sec24.title) + '</b>');
+          for (var mi = 0; mi < sec24.items.length; mi++) {
+            var it24 = sec24.items[mi];
+            messages.push((mi + 1) + '. ' + escapeHtml(it24.title) + (it24.url ? '\n   ' + it24.url : ''));
+          }
+          messages.push('');
+        }
+      }
+
+      if (sections.length === 0 && marketSections24h.length === 0) {
+        messages.push('Chưa tìm thấy nhóm tin phù hợp. Hãy thử: /tinngay điện vận tải, /tinngay ngân hàng, /tinngay bất động sản');
+      }
+    }
+
+    if (focusMode) {
+      if (sections.length === 0) {
+        messages.push('Không tìm thấy tin đúng theo chủ đề này. Hãy thử từ khóa cụ thể hơn, ví dụ: vàng, giá vàng SJC, xăng dầu, giá dầu, Iran, Mỹ, ngân hàng.');
+      } else {
+        for (var fs = 0; fs < sections.length; fs++) {
+          var fsec = sections[fs];
+          if (!fsec.items || fsec.items.length === 0) continue;
+          messages.push('🔹 <b>' + escapeHtml(fsec.title) + '</b>');
+          for (var fii = 0; fii < fsec.items.length; fii++) {
+            var fitem = fsec.items[fii];
+            messages.push((fii + 1) + '. ' + escapeHtml(fitem.title) + (fitem.url ? '\n   ' + fitem.url : ''));
+          }
+          messages.push('');
+        }
+      }
+    }
+
+    var finalText = messages.join('\n');
+    sendLongMessage(chatId, finalText);
+  } catch (err) {
+    Logger.log('handleTinNgayCommand error: ' + err.toString());
+    sendMessage(chatId, '❌ Lỗi khi tổng hợp tin tức.');
+  }
+}
+
+function parseTinNgayKeywords(argsText) {
+  var raw = String(argsText || '').trim().toLowerCase();
+  if (!raw) return [];
+  var parts = raw.split(/[\s,;|]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+  var map = {
+    'điện': 'điện', 'dien': 'điện', 'evn': 'điện', 'power': 'điện',
+    'vận tải': 'vận tải', 'vantai': 'vận tải', 'logistics': 'vận tải', 'cảng': 'vận tải', 'cang': 'vận tải', 'shipping': 'vận tải', 'tàu': 'vận tải', 'tau': 'vận tải',
+    'ngân hàng': 'ngân hàng', 'nganhang': 'ngân hàng', 'bank': 'ngân hàng',
+    'bất động sản': 'bất động sản', 'batdongsan': 'bất động sản', 'bds': 'bất động sản',
+    'dầu': 'dầu khí', 'dau': 'dầu khí', 'dầu khí': 'dầu khí', 'da khi': 'dầu khí',
+    'chứng khoán': 'chứng khoán', 'chungkhoan': 'chứng khoán',
+    'vàng': 'vàng', 'vang': 'vàng',
+    'thế giới': 'thế giới', 'the gioi': 'thế giới', 'quốc tế': 'thế giới', 'quocte': 'thế giới',
+    'xăng': 'xăng dầu', 'xang': 'xăng dầu', 'xăng dầu': 'xăng dầu', 'xang dau': 'xăng dầu', 'nhiên liệu': 'xăng dầu', 'nhienlieu': 'xăng dầu'
+  };
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var k = parts[i];
+    if (map[k] && out.indexOf(map[k]) === -1) out.push(map[k]);
+  }
+  return out;
+}
+
+function buildTinNgaySections(keywords) {
+  var today = collectVietstockTodayHeadlines();
+  var sections = [];
+  var universe = [
+    {
+      title: 'Điện',
+      terms: ['điện', 'evn', 'power'],
+      items: today.filter(function(x) { return /điện|evn|chugoku/i.test(x.title); }).slice(0, 5)
+    },
+    {
+      title: 'Vận tải / Logistics / Cảng',
+      terms: ['vận tải', 'logistics', 'cảng', 'tàu', 'shipping'],
+      items: today.filter(function(x) { return /cảng|vận tải|logistics|tàu|shipping/i.test(x.title); }).slice(0, 5)
+    },
+    {
+      title: 'Ngân hàng',
+      terms: ['ngân hàng', 'bank'],
+      items: today.filter(function(x) { return /ngân hàng|bank/i.test(x.title); }).slice(0, 5)
+    },
+    {
+      title: 'Bất động sản',
+      terms: ['bất động sản', 'bds'],
+      items: today.filter(function(x) { return /bất động sản|bđs|bds/i.test(x.title); }).slice(0, 5)
+    },
+    {
+      title: 'Dầu khí / Hàng hóa',
+      terms: ['dầu', 'vàng'],
+      items: today.filter(function(x) { return /dầu|vàng|nhiên liệu|kim loại/i.test(x.title); }).slice(0, 5)
+    }
+  ];
+
+  if (!keywords || keywords.length === 0) {
+    for (var u = 0; u < universe.length; u++) {
+      if (universe[u].items.length > 0) sections.push(universe[u]);
+    }
+    return sections;
+  }
+
+  for (var i = 0; i < universe.length; i++) {
+    var group = universe[i];
+    var match = false;
+    for (var j = 0; j < keywords.length; j++) {
+      if (group.terms.indexOf(keywords[j]) !== -1) {
+        match = true;
+        break;
+      }
+    }
+    if (match && group.items.length > 0) sections.push(group);
+  }
+
+  if (sections.length === 0) {
+    for (var k = 0; k < universe.length; k++) {
+      if (universe[k].items.length > 0) sections.push(universe[k]);
+    }
+  }
+
+  return sections;
+}
+
+function collectFocusedTinNgay(queryText) {
+  var q = String(queryText || '').trim().toLowerCase();
+  var items = collectVietstockTodayHeadlines().concat(collect24hFocusItems(q));
+  var scored = [];
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var score = scoreTinNgayItem(item.title, q);
+    if (score > 0) scored.push({ item: item, score: score });
+  }
+  scored.sort(function(a, b) { return b.score - a.score; });
+
+  var top = [];
+  var seen = {};
+  for (var j = 0; j < scored.length; j++) {
+    var t = scored[j].item.title;
+    if (!t || seen[t]) continue;
+    seen[t] = true;
+    top.push(scored[j].item);
+    if (top.length >= 8) break;
+  }
+
+  if (top.length === 0) return [];
+  return [{ title: 'Kết quả liên quan nhất', items: top }];
+}
+
+function collect24hFocusItems(queryText) {
+  var items = [];
+  try {
+    var html = UrlFetchApp.fetch('https://www.24h.com.vn/', { muteHttpExceptions: true }).getContentText();
+    var candidates = parse24hHighlights(html);
+    for (var i = 0; i < candidates.length; i++) {
+      var it = candidates[i];
+      if (scoreTinNgayItem(it.title, queryText) > 0) items.push(it);
+    }
+  } catch (e) {
+    Logger.log('collect24hFocusItems error: ' + e.toString());
+  }
+  return items;
+}
+
+function scoreTinNgayItem(title, queryText) {
+  var hay = String(title || '').toLowerCase();
+  var q = String(queryText || '').toLowerCase().trim();
+  var score = 0;
+  if (!hay) return 0;
+
+  if (q) {
+    if (hay === q) score += 100;
+    if (hay.indexOf(q) !== -1) score += 60;
+  }
+
+  var qMap = {
+    'vàng': ['vàng', 'giá vàng', 'sjc', 'nhẫn', 'kim loại'],
+    'giá vàng': ['vàng', 'giá vàng', 'sjc', 'nhẫn', 'kim loại'],
+    'xăng dầu': ['xăng', 'dầu', 'nhiên liệu', 'oil'],
+    'xăng': ['xăng', 'dầu', 'nhiên liệu', 'oil'],
+    'dầu': ['xăng', 'dầu', 'nhiên liệu', 'oil'],
+    'thế giới': ['thế giới', 'quốc tế', 'mỹ', 'iran', 'trung đông'],
+    'quốc tế': ['thế giới', 'quốc tế', 'mỹ', 'iran', 'trung đông'],
+    'ngân hàng': ['ngân hàng', 'bank', 'lãi suất'],
+    'bất động sản': ['bất động sản', 'bds', 'nhà đất'],
+    'điện': ['điện', 'evn', 'power'],
+    'vận tải': ['cảng', 'logistics', 'vận tải', 'shipping']
+  };
+
+  for (var key in qMap) {
+    if (q.indexOf(key) !== -1) {
+      var arr = qMap[key];
+      for (var k = 0; k < arr.length; k++) {
+        if (hay.indexOf(arr[k]) !== -1) score += 20;
+      }
+    }
+  }
+
+  return score;
+}
+
+function collect24hMarketHighlights(keywords) {
+  var sections = [];
+  try {
+    var html = UrlFetchApp.fetch('https://www.24h.com.vn/', { muteHttpExceptions: true }).getContentText();
+    var candidates = parse24hHighlights(html);
+    var normalized = normalizeTinNgayKeywordsForSearch(keywords);
+
+    var world = candidates.filter(function(x) {
+      return /thế giới|quốc tế|trung đông|iran|mỹ/i.test(x.title) && matchesAnyKeyword(x.title, normalized, ['thế giới', 'quốc tế', 'iran', 'mỹ', 'trung đông']);
+    }).slice(0, 5);
+
+    var gold = candidates.filter(function(x) {
+      return /giá vàng|vàng/i.test(x.title) && matchesAnyKeyword(x.title, normalized, ['vàng', 'giá vàng', 'kim loại']);
+    }).slice(0, 5);
+
+    var oil = candidates.filter(function(x) {
+      return /xăng|dầu|nhiên liệu/i.test(x.title) && matchesAnyKeyword(x.title, normalized, ['xăng', 'dầu', 'nhiên liệu']);
+    }).slice(0, 5);
+
+    if (normalized.length === 0) {
+      if (world.length > 0) sections.push({ title: 'Thế giới', items: world });
+      if (gold.length > 0) sections.push({ title: 'Giá vàng', items: gold });
+      if (oil.length > 0) sections.push({ title: 'Xăng dầu', items: oil });
+      if (sections.length === 0 && candidates.length > 0) {
+        sections.push({ title: '24h nổi bật', items: candidates.slice(0, 8) });
+      }
+      return sections;
+    }
+
+    if (world.length > 0) sections.push({ title: 'Thế giới', items: world });
+    if (gold.length > 0) sections.push({ title: 'Giá vàng', items: gold });
+    if (oil.length > 0) sections.push({ title: 'Xăng dầu', items: oil });
+  } catch (e) {
+    Logger.log('collect24hMarketHighlights error: ' + e.toString());
+  }
+  return sections;
+}
+
+function normalizeTinNgayKeywordsForSearch(keywords) {
+  var out = [];
+  for (var i = 0; i < (keywords || []).length; i++) {
+    var k = String(keywords[i] || '').toLowerCase().trim();
+    if (!k) continue;
+    if (out.indexOf(k) === -1) out.push(k);
+  }
+  return out;
+}
+
+function matchesAnyKeyword(text, keywords, fallbackKeywords) {
+  var hay = String(text || '').toLowerCase();
+  var list = (keywords && keywords.length > 0) ? keywords : (fallbackKeywords || []);
+  for (var i = 0; i < list.length; i++) {
+    var needle = String(list[i] || '').toLowerCase().trim();
+    if (!needle) continue;
+    if (hay.indexOf(needle) !== -1) return true;
+  }
+  return false;
+}
+
+function parse24hHighlights(html) {
+  var result = [];
+  var source = String(html || '');
+  if (!source) return result;
+
+  var re = /<a[^>]+href="(https:\/\/www\.24h\.com\.vn\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  var m;
+  while ((m = re.exec(source)) !== null) {
+    var url = m[1] || '';
+    var inner = m[2] || '';
+    var text = inner
+      .replace(/<img[\s\S]*?>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!text) continue;
+    if (text.length < 10) continue;
+    if (!/giá vàng|xăng|dầu|thế giới|quốc tế|iran|mỹ|trung đông|kinh doanh/i.test(text)) continue;
+
+    if (result.every(function(x) { return x.title !== text; })) {
+      result.push({ title: text, url: url });
+    }
+    if (result.length >= 20) break;
+  }
+
+  return result;
+}
+
+function collectVietstockTodayHeadlines() {
+  var feeds = [
+    'https://vietstock.vn/830/chung-khoan/co-phieu.rss',
+    'https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss',
+    'https://vietstock.vn/757/tai-chinh/ngan-hang.rss',
+    'https://vietstock.vn/1636/nhan-dinh-phan-tich/nhan-dinh-thi-truong.rss',
+    'https://vietstock.vn/42221/bat-dong-san/quy-hoach-ha-tang.rss',
+    'https://vietstock.vn/34/hang-hoa/nhien-lieu.rss',
+    'https://vietstock.vn/4264/tai-chinh-ca-nhan/xe-cong-nghe.rss',
+    'https://vietstock.vn/768/kinh-te/kinh-te-dau-tu.rss'
+  ];
+
+  var items = [];
+  for (var i = 0; i < feeds.length; i++) {
+    try {
+      var xmlText = UrlFetchApp.fetch(feeds[i], { muteHttpExceptions: true }).getContentText();
+      var parsed = parseRssItems(xmlText);
+      for (var j = 0; j < parsed.length; j++) {
+        var it = parsed[j];
+        if (it.title && items.every(function(x) { return x.title !== it.title; })) {
+          items.push(it);
+        }
+      }
+    } catch (e) {
+      Logger.log('collectVietstockTodayHeadlines feed error: ' + feeds[i] + ' => ' + e.toString());
+    }
+  }
+  return items;
+}
+
+function parseRssItems(xmlText) {
+  var result = [];
+  if (!xmlText) return result;
+  var matched = xmlText.match(/<item>[\s\S]*?<\/item>/gi) || [];
+  for (var i = 0; i < matched.length; i++) {
+    var block = matched[i];
+    var title = extractXmlTag(block, 'title');
+    var link = extractXmlTag(block, 'link');
+    var pubDate = extractXmlTag(block, 'pubDate');
+    result.push({ title: decodeHtmlEntities(stripCdata(title)), url: link, pubDate: pubDate });
+  }
+  return result;
+}
+
+function extractXmlTag(block, tagName) {
+  var re = new RegExp('<' + tagName + '>([\\s\\S]*?)<\/' + tagName + '>', 'i');
+  var m = String(block || '').match(re);
+  return m ? m[1] : '';
+}
+
+function stripCdata(s) {
+  return String(s || '').replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '');
+}
+
+function decodeHtmlEntities(s) {
+  return String(s || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sendLongMessage(chatId, text, replyMarkup) {
+  var maxLen = 3800;
+  var chunks = splitTelegramMessage(text, maxLen);
+  for (var i = 0; i < chunks.length; i++) {
+    var markup = (i === chunks.length - 1) ? replyMarkup : null;
+    sendMessage(chatId, chunks[i], markup || null);
+  }
+}
+
+function splitTelegramMessage(text, maxLen) {
+  var s = String(text || '');
+  if (s.length <= maxLen) return [s];
+  var out = [];
+  while (s.length > maxLen) {
+    var cut = s.lastIndexOf('\n', maxLen);
+    if (cut < maxLen * 0.5) cut = s.lastIndexOf(' ', maxLen);
+    if (cut < maxLen * 0.5) cut = maxLen;
+    out.push(s.slice(0, cut).trim());
+    s = s.slice(cut).trim();
+  }
+  if (s) out.push(s);
+  return out;
 }
 
 // ============================================
