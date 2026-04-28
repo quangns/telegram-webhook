@@ -8,6 +8,7 @@ var COMMANDS = [
   {cmd: "/start", usage: "/start", desc: "Bắt đầu"},
   {cmd: "/help", usage: "/help", desc: "Xem hướng dẫn"},
   {cmd: "/tinngay", usage: "/tinngay [từ khóa]", desc: "Tổng hợp tin tức Vietstock hằng ngày (ví dụ: /tinngay điện vận tải)"},
+  {cmd: "/search", usage: "/search [từ khóa]", desc: "Tìm kiếm web bằng Brave Search"},
   {cmd: "/nhacnho", usage: "/nhacnho ...", desc: "Đặt nhắc (ví dụ: /nhacnho 8h sáng ngày mai Gặp khách)"},
   {cmd: "/log", usage: "/log [thu] [mô tả] [số tiền]", desc: "Ghi thu chi cá nhân"},
   {cmd: "/analyze", usage: "/analyze [1w|1m|tháng N]", desc: "Phân tích thu/chi theo danh mục trong khung thời gian (ví dụ: 1w, 1m, tháng 3)"},
@@ -423,6 +424,15 @@ function handleTelegramMessage(message) {
       sendMessage(chatId, '❌ Lỗi khi tổng hợp tin tức.');
     }
   }
+  else if (text.startsWith("/search")) {
+    try {
+      var searchArgsText = text.replace(/^\/search\b/i, '').trim();
+      handleSearchCommand(chatId, searchArgsText);
+    } catch (e) {
+      Logger.log('handle /search error: ' + e.toString());
+      sendMessage(chatId, '❌ Lỗi khi tìm kiếm.');
+    }
+  }
   else if (text.startsWith("/analyze")) {
         try {
           var parts = text.split(/\s+/);
@@ -774,9 +784,100 @@ function logFinanceCommand(username, type, description, amount) {
 }
 
 // ============================================
-// 6.7. TÌM KIẾM TRÊN DUCKDUCKGO (ALTERNATIVE CHO PERPLEXITY)
+// 6.7. TÌM KIẾM TRÊN BRAVE SEARCH
 // ============================================
-// searchPerplexity removed — /search command no longer supported
+function handleSearchCommand(chatId, argsText) {
+  var rawArgs = String(argsText || '').trim();
+  if (!rawArgs) {
+    sendMessage(chatId, '🔎 Cú pháp: /search [từ khóa]\nVí dụ: /search giá vàng hôm nay');
+    return;
+  }
+
+  try {
+    var results = searchBraveWeb(rawArgs);
+    if (!results || results.length === 0) {
+      sendMessage(chatId, 'Không tìm thấy kết quả phù hợp từ Brave Search.');
+      return;
+    }
+
+    var lines = [];
+    lines.push('🔎 <b>Kết quả Brave Search</b>');
+    lines.push('Từ khóa: ' + escapeHtml(rawArgs));
+    lines.push('Ngày: ' + new Date().toLocaleString('vi-VN'));
+    lines.push('');
+
+    for (var i = 0; i < results.length; i++) {
+      var item = results[i];
+      lines.push((i + 1) + '. <b>' + escapeHtml(item.title) + '</b>');
+      if (item.description) lines.push('   ' + escapeHtml(item.description));
+      if (item.url) lines.push('   ' + item.url);
+      lines.push('');
+    }
+
+    sendLongMessage(chatId, lines.join('\n'));
+  } catch (error) {
+    Logger.log('handleSearchCommand error: ' + error.toString());
+    sendMessage(chatId, '❌ Lỗi khi gọi Brave Search. Hãy kiểm tra BRAVE_SEARCH_API_KEY hoặc thử lại sau.');
+  }
+}
+
+function searchBraveWeb(queryText) {
+  if (typeof BRAVE_SEARCH_API_KEY === 'undefined' || !String(BRAVE_SEARCH_API_KEY || '').trim()) {
+    throw new Error('BRAVE_SEARCH_API_KEY is not configured.');
+  }
+
+  var url = 'https://api.search.brave.com/res/v1/web/search'
+    + '?q=' + encodeURIComponent(String(queryText || '').trim())
+    + '&count=8'
+    + '&country=ALL'
+    + '&search_lang=vi'
+    + '&safesearch=moderate'
+    + '&text_decorations=false';
+
+  var response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      'Accept': 'application/json',
+      'X-Subscription-Token': BRAVE_SEARCH_API_KEY
+    },
+    muteHttpExceptions: true
+  });
+
+  var status = response.getResponseCode();
+  var body = response.getContentText();
+  if (status < 200 || status >= 300) {
+    Logger.log('Brave Search error ' + status + ': ' + body);
+    throw new Error('Brave Search API returned HTTP ' + status);
+  }
+
+  var data = JSON.parse(body || '{}');
+  return parseBraveSearchResults(data);
+}
+
+function parseBraveSearchResults(data) {
+  var out = [];
+  var results = data && data.web && data.web.results ? data.web.results : [];
+  for (var i = 0; i < results.length; i++) {
+    var item = results[i] || {};
+    var title = stripHtmlTags(item.title || '');
+    var description = stripHtmlTags(item.description || '');
+    var url = item.url || '';
+    if (!title || !url) continue;
+    out.push({
+      title: title,
+      description: description,
+      url: url
+    });
+  }
+  return out;
+}
+
+function stripHtmlTags(text) {
+  return String(text || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 // ============================================
 // 7. KEYBOARD (NÚT BẤM)

@@ -83,6 +83,8 @@ curl -X POST https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook \
 3. **Gửi các lệnh:**
    - `/start` - Bắt đầu
    - `/help` - Xem danh sách lệnh
+   - `/tinngay [từ khóa]` - Tổng hợp tin tức theo ngày/chủ đề
+   - `/search [từ khóa]` - Tìm kiếm web bằng Brave Search
    - `/info` - Thông tin bot
    - `/hello` - Chào hỏi
    - `/status` - Trạng thái
