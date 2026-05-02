@@ -84,7 +84,9 @@ curl -X POST https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook \
    - `/start` - Bắt đầu
    - `/help` - Xem danh sách lệnh
    - `/tinngay [từ khóa]` - Tổng hợp tin tức theo ngày/chủ đề
-   - `/search [từ khóa] [thời gian]` - Tóm tắt tổng hợp theo chủ đề/thời gian; riêng truy vấn `giá [object] [thời gian]` sẽ ưu tiên so sánh giá theo các mốc gần nhau
+   - `/search giá "mặt hàng"` - So sánh giá bán ra hôm nay với các ngày trước đó
+   - `/search tin tức "chủ đề"` - Chỉ tóm tắt tin tức liên quan đến chủ đề
+   - `/search tin tức` - Tóm tắt tin tức chính trị trong ngày hôm nay
    - `/info` - Thông tin bot
    - `/hello` - Chào hỏi
    - `/status` - Trạng thái

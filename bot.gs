@@ -8,7 +8,7 @@ var COMMANDS = [
   {cmd: "/start", usage: "/start", desc: "Bắt đầu"},
   {cmd: "/help", usage: "/help", desc: "Xem hướng dẫn"},
   {cmd: "/tinngay", usage: "/tinngay [từ khóa]", desc: "Tổng hợp tin tức Vietstock hằng ngày (ví dụ: /tinngay điện vận tải)"},
-  {cmd: "/search", usage: "/search [từ khóa]", desc: "Tìm kiếm web bằng Brave Search"},
+  {cmd: "/search", usage: "/search giá \"mặt hàng\" | /search tin tức [\"chủ đề\"]", desc: "So sánh giá bán ra hoặc tóm tắt tin tức"},
   {cmd: "/nhacnho", usage: "/nhacnho ...", desc: "Đặt nhắc (ví dụ: /nhacnho 8h sáng ngày mai Gặp khách)"},
   {cmd: "/log", usage: "/log [thu] [mô tả] [số tiền]", desc: "Ghi thu chi cá nhân"},
   {cmd: "/analyze", usage: "/analyze [1w|1m|tháng N]", desc: "Phân tích thu/chi theo danh mục trong khung thời gian (ví dụ: 1w, 1m, tháng 3)"},
@@ -789,7 +789,7 @@ function logFinanceCommand(username, type, description, amount) {
 function handleSearchCommand(chatId, argsText) {
   var rawArgs = String(argsText || '').trim();
   if (!rawArgs) {
-    sendMessage(chatId, '🔎 Cú pháp: /search [từ khóa] [thời gian]\nVí dụ: /search giá vàng hôm nay\n/search chiến sự trung đông tuần này');
+    sendMessage(chatId, '🔎 Cú pháp: /search giá "mặt hàng" hoặc /search tin tức ["chủ đề"]\nVí dụ: /search giá "vàng SJC"\n/search tin tức "xyz"\n/search tin tức');
     return;
   }
 
@@ -797,6 +797,10 @@ function handleSearchCommand(chatId, argsText) {
     var intent = parseSearchIntent(rawArgs);
 
     if (intent.isPriceQuery) {
+      if (!intent.priceObject) {
+        sendMessage(chatId, '🔎 Cú pháp: /search giá "mặt hàng"\nVí dụ: /search giá "vàng SJC"');
+        return;
+      }
       if (isGoldPriceSearchQuery(intent.topicText)) {
         handleGoldPriceSearchCommand(chatId, rawArgs, intent);
       } else {
@@ -815,29 +819,70 @@ function handleSearchCommand(chatId, argsText) {
 function parseSearchIntent(rawArgs) {
   var original = String(rawArgs || '').trim();
   var normalized = normalizeVietnameseText(original);
+  var modeInfo = extractSearchModeAndTopic(original);
   var timeInfo = extractTimeIntent(original);
-  var topicText = original;
+  var topicText = modeInfo.mode ? modeInfo.topicText : original;
   if (timeInfo.matchedText) {
     var escapedTime = escapeRegex(timeInfo.matchedText);
     topicText = original.replace(new RegExp(escapedTime, 'i'), ' ').replace(/\s+/g, ' ').trim();
+    if (modeInfo.mode) {
+      topicText = extractSearchModeAndTopic(topicText).topicText;
+    }
   }
 
   var normalizedTopic = normalizeVietnameseText(topicText);
-  var isPriceQuery = /^gia\s+/i.test(normalizedTopic) || /\bgia\b/i.test(normalizedTopic);
-  var priceObject = normalizedTopic.replace(/^gia\s+/i, '').trim();
+  var isPriceQuery = modeInfo.mode === 'price' || /^gia\s+/i.test(normalizedTopic) || /\bgia\b/i.test(normalizedTopic);
+  var isNewsQuery = modeInfo.mode === 'news';
+  var priceObject = isPriceQuery
+    ? stripWrappingQuotes((modeInfo.mode === 'price' ? topicText : topicText.replace(/^giá\s+/i, '').replace(/^gia\s+/i, '')).trim())
+    : '';
+  if (isNewsQuery && !topicText) topicText = 'chính trị';
 
   return {
     rawArgs: original,
     normalizedArgs: normalized,
+    searchMode: modeInfo.mode || (isPriceQuery ? 'price' : (isNewsQuery ? 'news' : 'general')),
     timeLabel: timeInfo.label,
     timeMatchedText: timeInfo.matchedText,
     currentSuffix: timeInfo.currentSuffix,
     previousSuffix: timeInfo.previousSuffix,
     topicText: topicText || original,
     normalizedTopic: normalizedTopic,
+    isNewsQuery: isNewsQuery,
     isPriceQuery: isPriceQuery,
     priceObject: priceObject
   };
+}
+
+function extractSearchModeAndTopic(text) {
+  var source = String(text || '').trim();
+  var normalized = normalizeVietnameseText(source);
+  var newsMatch = normalized.match(/^tin\s+tuc\b/);
+  if (newsMatch) {
+    return {
+      mode: 'news',
+      topicText: stripWrappingQuotes(source.replace(/^\S+\s+\S+/, '').trim())
+    };
+  }
+
+  var priceMatch = normalized.match(/^gia\b/);
+  if (priceMatch) {
+    return {
+      mode: 'price',
+      topicText: stripWrappingQuotes(source.replace(/^\S+/, '').trim())
+    };
+  }
+
+  return { mode: '', topicText: source };
+}
+
+function stripWrappingQuotes(text) {
+  var s = String(text || '').trim();
+  if ((s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') ||
+      (s.charAt(0) === "'" && s.charAt(s.length - 1) === "'")) {
+    return s.substring(1, s.length - 1).trim();
+  }
+  return s;
 }
 
 function extractTimeIntent(text) {
@@ -862,7 +907,7 @@ function extractTimeIntent(text) {
     if (m) {
       return {
         label: p.label,
-        matchedText: m[0],
+        matchedText: source.substr(m.index, m[0].length),
         currentSuffix: p.currentSuffix,
         previousSuffix: p.previousSuffix
       };
@@ -878,16 +923,24 @@ function extractTimeIntent(text) {
 }
 
 function handleTemporalNewsSearchCommand(chatId, rawArgs, intent) {
-  var searchQuery = buildTemporalSearchQuery(intent.topicText, intent.currentSuffix);
+  var topic = stripWrappingQuotes(intent.topicText || '');
+  var isExplicitNews = intent.searchMode === 'news';
+  var effectiveTopic = isExplicitNews && !topic ? 'chính trị' : topic;
+  var searchQuery = isExplicitNews
+    ? buildNewsSearchQuery(effectiveTopic, intent.currentSuffix)
+    : buildTemporalSearchQuery(effectiveTopic, intent.currentSuffix);
   var results = searchBraveWeb(searchQuery, 6);
+  if (isExplicitNews && topic) {
+    results = filterSearchResultsByTopic(results, topic);
+  }
   if (!results || results.length === 0) {
-    sendMessage(chatId, 'Không tìm thấy kết quả phù hợp cho chủ đề và mốc thời gian này.');
+    sendMessage(chatId, 'Không tìm thấy tin tức phù hợp với chủ đề này trong hôm nay.');
     return;
   }
 
   var lines = [];
-  lines.push('📰 <b>Tóm tắt tìm kiếm theo thời gian</b>');
-  lines.push('Chủ đề: ' + escapeHtml(intent.topicText));
+  lines.push('📰 <b>Tóm tắt tin tức</b>');
+  lines.push('Chủ đề: ' + escapeHtml(effectiveTopic));
   lines.push('Thời gian: ' + escapeHtml(intent.timeLabel));
   lines.push('Truy vấn: ' + escapeHtml(searchQuery));
   lines.push('');
@@ -912,52 +965,68 @@ function handleTemporalNewsSearchCommand(chatId, rawArgs, intent) {
 
 function handleGenericPriceSearchCommand(chatId, rawArgs, intent) {
   var objectText = intent.priceObject || intent.topicText;
-  var currentQuery = buildPriceSearchQuery(objectText, intent.currentSuffix);
-  var previousQuery = buildPriceSearchQuery(objectText, intent.previousSuffix);
+  var comparisonDays = buildRecentDateLabels(4);
+  var currentQuery = buildSellPriceSearchQuery(objectText, comparisonDays[0].queryLabel);
   var currentResults = searchBraveWeb(currentQuery, 5);
-  var previousResults = searchBraveWeb(previousQuery, 5);
+  var previousSamples = [];
+  for (var d = 1; d < comparisonDays.length; d++) {
+    var previousQuery = buildSellPriceSearchQuery(objectText, comparisonDays[d].queryLabel);
+    var previousResults = searchBraveWeb(previousQuery, 4);
+    var sample = extractRepresentativeSellPrice(previousResults || []);
+    previousSamples.push({
+      dateLabel: comparisonDays[d].displayLabel,
+      query: previousQuery,
+      sample: sample
+    });
+  }
 
-  if ((!currentResults || currentResults.length === 0) && (!previousResults || previousResults.length === 0)) {
+  if (!currentResults || currentResults.length === 0) {
     sendMessage(chatId, 'Không tìm thấy dữ liệu giá phù hợp để so sánh.');
     return;
   }
 
-  var currentSample = extractRepresentativePrice(currentResults || []);
-  var previousSample = extractRepresentativePrice(previousResults || []);
+  var currentSample = extractRepresentativeSellPrice(currentResults || []);
 
   var lines = [];
-  lines.push('💹 <b>So sánh giá theo thời gian</b>');
+  lines.push('💹 <b>So sánh giá bán ra</b>');
   lines.push('Đối tượng: ' + escapeHtml(objectText));
-  lines.push('Thời gian hiện tại: ' + escapeHtml(intent.currentSuffix));
-  lines.push('Mốc so sánh: ' + escapeHtml(intent.previousSuffix));
+  lines.push('Hôm nay: ' + escapeHtml(comparisonDays[0].displayLabel));
+  lines.push('Truy vấn: ' + escapeHtml(currentQuery));
   lines.push('');
 
   if (currentSample) {
-    lines.push('📍 <b>Kết quả gần nhất</b>');
+    lines.push('📍 <b>Giá bán ra hôm nay</b>');
     lines.push('• ' + escapeHtml(currentSample.title));
     if (currentSample.description) lines.push('  ' + escapeHtml(currentSample.description));
-    if (currentSample.priceText) lines.push('• Giá trích được: ' + escapeHtml(currentSample.priceText));
+    if (currentSample.priceText) lines.push('• Giá bán ra trích được: ' + escapeHtml(currentSample.priceText));
     if (currentSample.url) lines.push('• Nguồn: ' + currentSample.url);
     lines.push('');
   }
 
-  if (previousSample) {
-    lines.push('🕰️ <b>Mốc trước đó</b>');
-    lines.push('• ' + escapeHtml(previousSample.title));
-    if (previousSample.description) lines.push('  ' + escapeHtml(previousSample.description));
-    if (previousSample.priceText) lines.push('• Giá trích được: ' + escapeHtml(previousSample.priceText));
-    if (previousSample.url) lines.push('• Nguồn: ' + previousSample.url);
-    lines.push('');
+  lines.push('🕰️ <b>Các ngày trước đó</b>');
+  var compared = false;
+  for (var i = 0; i < previousSamples.length; i++) {
+    var row = previousSamples[i];
+    if (!row.sample) {
+      lines.push('• ' + escapeHtml(row.dateLabel) + ': chưa tìm thấy nguồn phù hợp.');
+      continue;
+    }
+    var priceLine = row.sample.priceText ? row.sample.priceText : 'chưa trích được số';
+    lines.push('• ' + escapeHtml(row.dateLabel) + ': ' + escapeHtml(priceLine) + ' - ' + escapeHtml(row.sample.title));
+    if (currentSample && currentSample.priceValue !== null && row.sample.priceValue !== null) {
+      var delta = currentSample.priceValue - row.sample.priceValue;
+      var direction = delta > 0 ? 'tăng' : (delta < 0 ? 'giảm' : 'không đổi');
+      lines.push('  So với hôm nay: hôm nay ' + direction + ' ' + escapeHtml(formatVietnameseNumber(Math.abs(delta))) + '.');
+      compared = true;
+    }
   }
 
-  if (currentSample && previousSample && currentSample.priceValue !== null && previousSample.priceValue !== null) {
-    var delta = currentSample.priceValue - previousSample.priceValue;
-    var direction = delta > 0 ? 'tăng' : (delta < 0 ? 'giảm' : 'không đổi');
-    lines.push('📊 <b>So sánh nhanh</b>');
-    lines.push('• Giá hiện tại ' + direction + ' ' + escapeHtml(formatVietnameseNumber(Math.abs(delta))) + ' so với mốc trước.');
+  lines.push('');
+  lines.push('📊 <b>Ghi chú so sánh</b>');
+  if (compared) {
+    lines.push('• Chênh lệch tính từ giá bán ra trích được trong tiêu đề/mô tả kết quả tìm kiếm.');
   } else {
-    lines.push('📊 <b>So sánh nhanh</b>');
-    lines.push('• Tôi đã gom kết quả cho hai mốc thời gian, nhưng không trích được đủ số liệu chuẩn để tính chênh lệch chính xác tự động. Hãy xem 2 nguồn ở trên để đối chiếu.');
+    lines.push('• Tôi đã gom nguồn cho hôm nay và các ngày trước, nhưng chưa đủ số liệu chuẩn để tính chênh lệch tự động.');
   }
 
   sendLongMessage(chatId, lines.join('\n'));
@@ -975,6 +1044,37 @@ function buildPriceSearchQuery(objectText, timeSuffix) {
   return 'giá ' + objectPart + (suffix ? (' ' + suffix) : '');
 }
 
+function buildSellPriceSearchQuery(objectText, timeSuffix) {
+  var objectPart = String(objectText || '').trim();
+  var suffix = String(timeSuffix || '').trim();
+  return 'giá bán ra ' + objectPart + (suffix ? (' ' + suffix) : '');
+}
+
+function buildNewsSearchQuery(topicText, timeSuffix) {
+  var topic = String(topicText || '').trim() || 'chính trị';
+  var suffix = String(timeSuffix || '').trim() || 'hôm nay';
+  return 'tin tức ' + topic + ' ' + suffix;
+}
+
+function filterSearchResultsByTopic(results, topicText) {
+  var tokens = normalizeVietnameseText(topicText).split(/\s+/).filter(function(t) {
+    return t && t.length > 1 && ['tin', 'tuc', 'hom', 'nay', 've', 'cua', 'cho'].indexOf(t) === -1;
+  });
+  if (tokens.length === 0) return results || [];
+
+  var filtered = [];
+  for (var i = 0; i < (results || []).length; i++) {
+    var item = results[i] || {};
+    var hay = normalizeVietnameseText([item.title || '', item.description || ''].join(' '));
+    var matched = 0;
+    for (var j = 0; j < tokens.length; j++) {
+      if (hay.indexOf(tokens[j]) !== -1) matched++;
+    }
+    if (matched > 0 && (tokens.length <= 2 || matched >= 2)) filtered.push(item);
+  }
+  return filtered;
+}
+
 function extractRepresentativePrice(results) {
   for (var i = 0; i < (results || []).length; i++) {
     var item = results[i] || {};
@@ -989,6 +1089,52 @@ function extractRepresentativePrice(results) {
     };
   }
   return null;
+}
+
+function extractRepresentativeSellPrice(results) {
+  for (var i = 0; i < (results || []).length; i++) {
+    var item = results[i] || {};
+    var combined = [item.title || '', item.description || ''].join(' ');
+    var sellMatch = combined.match(/(?:bán ra|ban ra|giá bán|gia ban)[^0-9]{0,30}(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)/i);
+    var genericMatch = combined.match(/\b\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?\b/);
+    var priceText = sellMatch ? sellMatch[1] : (genericMatch ? genericMatch[0] : '');
+    return {
+      title: item.title || '',
+      description: item.description || '',
+      url: item.url || '',
+      priceText: priceText,
+      priceValue: priceText ? parseVietnamesePriceToNumber(priceText) : null
+    };
+  }
+  return null;
+}
+
+function buildRecentDateLabels(count) {
+  var total = parseInt(count, 10);
+  if (!total || total < 1) total = 4;
+  var out = [];
+  var now = new Date();
+  for (var i = 0; i < total; i++) {
+    var d = new Date(now.getTime());
+    d.setDate(now.getDate() - i);
+    var display = formatDateForSearchDisplay(d);
+    out.push({
+      displayLabel: i === 0 ? ('hôm nay (' + display + ')') : display,
+      queryLabel: i === 0 ? 'hôm nay' : display
+    });
+  }
+  return out;
+}
+
+function formatDateForSearchDisplay(dateValue) {
+  try {
+    return Utilities.formatDate(dateValue, getScriptTimeZoneSafe(), 'dd/MM/yyyy');
+  } catch (err) {
+    var d = dateValue;
+    var day = String(d.getDate()).padStart(2, '0');
+    var month = String(d.getMonth() + 1).padStart(2, '0');
+    return day + '/' + month + '/' + d.getFullYear();
+  }
 }
 
 function escapeRegex(text) {
@@ -1008,7 +1154,7 @@ function handleGoldPriceSearchCommand(chatId, queryText) {
   }
 
   var lines = [];
-  lines.push('🥇 <b>Giá vàng hôm nay</b>');
+  lines.push('🥇 <b>So sánh giá bán ra vàng hôm nay</b>');
   lines.push('Truy vấn: ' + escapeHtml(queryText));
   if (summary.titleDate) lines.push('Ngày: ' + escapeHtml(summary.titleDate));
   if (summary.updatedAt) lines.push('Cập nhật: ' + escapeHtml(summary.updatedAt));
@@ -1025,7 +1171,7 @@ function handleGoldPriceSearchCommand(chatId, queryText) {
     }
     if (card.sellPrice) {
       var sellLine = '• Bán ra: ' + escapeHtml(card.sellPrice) + ' x1000đ/lượng';
-      if (card.sellChange) sellLine += ' (' + escapeHtml(card.sellChange) + ')';
+      if (card.sellChange) sellLine += ' - so với kỳ trước: ' + escapeHtml(card.sellChange);
       lines.push(sellLine);
     }
     if (card.buyPrice && card.sellPrice) {
@@ -1046,7 +1192,7 @@ function handleGoldPriceSearchCommand(chatId, queryText) {
   }
 
   lines.push('');
-  lines.push('ℹ️ Dòng trong ngoặc là biến động so với kỳ trước mà nguồn hiển thị, giúp bạn thấy mức chênh hiện tại so với quá khứ gần nhất.');
+  lines.push('ℹ️ Phần "so với kỳ trước" là biến động do nguồn hiển thị, dùng để đối chiếu giá bán ra hôm nay với mốc trước đó gần nhất.');
   sendLongMessage(chatId, lines.join('\n'));
 }
 

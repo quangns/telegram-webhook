@@ -85,6 +85,12 @@ Nhắc nhở (`/nhacnho`) — ví dụ định dạng thời gian được hỗ 
 
 Lưu ý: nếu người dùng gửi thời gian chỉ gồm giờ:phút mà thời điểm đó nhỏ hơn thời gian hiện tại, bot sẽ tự động đặt nhắc vào ngày kế tiếp.
 
+Tìm kiếm (`/search`) — các chế độ được hỗ trợ
+
+- `/search giá "abc"` → tìm giá bán ra của `abc` hôm nay và so sánh với các ngày trước đó.
+- `/search tin tức "xyz"` → chỉ tóm tắt, tổng hợp tin tức liên quan trực tiếp đến `xyz`.
+- `/search tin tức` → tóm tắt tin tức chính trị trong ngày hôm nay.
+
 Tệp mẫu tham chiếu trong repo
 - [telegram-webhook/bot.gs](telegram-webhook/bot.gs)
 - [telegram-webhook/config.gs](telegram-webhook/config.gs)
