@@ -210,9 +210,9 @@ function handleTelegramMessage(message) {
       var timeMatch = ftext.match(timeTokenRe);
 
       // day token detection
-      var dateTokenRe = /\b(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\b/i;
-
-      var hasDayToken = dateTokenRe.test(ftext);
+      var dateTokenRe = /\b(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|hôm\s+nay|hom\s+nay|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\b/i;
+      var sameDayHint = detectSameDayReminderHint(ftext);
+      var hasDayToken = dateTokenRe.test(ftext) || sameDayHint;
       var hasTimeToken = timeMatch !== null;
 
       // If has explicit time, schedule immediately
@@ -220,7 +220,7 @@ function handleTelegramMessage(message) {
         var argsForNhac;
         if (hasDayToken) {
           var dayMatch = ftext.match(dateTokenRe);
-          var dayToken = dayMatch ? dayMatch[0] : 'mai';
+          var dayToken = dayMatch ? dayMatch[0] : (sameDayHint ? 'hôm nay' : 'mai');
           var cleanedFtext = ftext.replace(dateTokenRe, '').trim();
           var formattedClean = '[' + senderDisplay + ' nhắn]: "' + cleanedFtext + '"';
           argsForNhac = timeMatch[0] + ' ' + dayToken + ' ' + formattedClean;
@@ -252,7 +252,7 @@ function handleTelegramMessage(message) {
       if (hasDayToken) {
         // This forward provides the day info
         var dayMatch = ftext.match(dateTokenRe);
-        var dayToken = dayMatch ? dayMatch[0] : '';
+        var dayToken = dayMatch ? dayMatch[0] : (sameDayHint ? 'hôm nay' : '');
         var dayOnlyMsg = ftext.replace(dateTokenRe, '').trim();
 
         if (pendingArray.length > 0) {
@@ -282,7 +282,8 @@ function handleTelegramMessage(message) {
           }
           summary += (pi + 1) + '. ' + item.sender + ' nhắn: ' + displayText + '\n';
         }
-        summary += '📅 Ngày: ' + dayToken + '\n\n⏰ Mấy giờ bạn muốn nhắc?';
+        var askTimeText = dayToken === 'hôm nay' ? '⏰ Mấy giờ hôm nay bạn muốn nhắc?' : '⏰ Mấy giờ bạn muốn nhắc?';
+        summary += '📅 Ngày: ' + dayToken + '\n\n' + askTimeText;
         sendMessage(chatId, summary);
 
       } else {
@@ -338,7 +339,7 @@ function handleTelegramMessage(message) {
         if (pendingArray.length > 0) {
           // Schedule reminder for each pending forward
           var successCount = 0;
-          var fullDayTokenRe = /\b(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\b/i;
+          var fullDayTokenRe = /\b(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|hôm\s+nay|hom\s+nay|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\b/i;
 
           for (var pi = 0; pi < pendingArray.length; pi++) {
             var item = pendingArray[pi];
@@ -2938,6 +2939,11 @@ function computeDateFromDayToken(dayTokenStr, hour, minute) {
     return candidate;
   }
   
+  // Handle "hôm nay"
+  if (s === 'hôm nay' || s === 'hom nay') {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour || 0, minute || 0, 0);
+  }
+
   // Handle "ngày mai" / "mai"
   if (s === 'ngày mai' || s === 'mai') {
     var tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hour || 0, minute || 0, 0);
@@ -3049,6 +3055,12 @@ function computeDateFromDayToken(dayTokenStr, hour, minute) {
   return null;
 }
 
+function detectSameDayReminderHint(text) {
+  var s = String(text || '').trim().toLowerCase();
+  if (!s) return false;
+  return /\b(lát|lat)\b|\b(chút|chut)\s+nữa\b|\b(hồi|hoi)\s+nữa\b|\blát\s+nữa\b|\blat\s+nua\b|\bchút\s+nữa\b|\bchut\s+nua\b|\bhồi\s+nữa\b|\bhoi\s+nua\b/.test(s);
+}
+
 // ============================================
 // Reminders: `/nhacnho` command + scheduler
 // ============================================
@@ -3121,7 +3133,7 @@ function handleNhacNhoCommand(chatId, userId, argsText) {
     // 3) Time + day token pattern: "20h thứ 3 message" or "15:30 thứ 7 message" - CHECK FIRST for specificity
     // Must be checked before the generic "time + period + optional day" pattern
     if (!whenDate) {
-      var dayTokenPattern = /^([0-9]{1,2})(?::([0-9]{2})|h([0-9]{1,2})?)?\s+(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\s+([\s\S]+)$/i;
+      var dayTokenPattern = /^([0-9]{1,2})(?::([0-9]{2})|h([0-9]{1,2})?)?\s+(thứ\s*\d+\s*(?:tuần\s*(?:tới|sau))?|thứ\s+(?:hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|chủ\s+nhật|chu\s+nhat|cn)\s*(?:tuần\s*(?:tới|sau))?|đầu\s+tháng\s*(?:sau)?|cuối\s+tháng|tháng\s*(?:sau|này)|hôm\s+nay|hom\s+nay|ngày\s+mai|mai|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}-\d{2}-\d{2})\s+([\s\S]+)$/i;
       m = rest.match(dayTokenPattern);
       if (m) {
         var hourDT = parseInt(m[1], 10);
