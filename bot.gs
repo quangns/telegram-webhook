@@ -96,6 +96,7 @@ function setupWebhook() {
     var url = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=` + WEBAPPURL + '&drop_pending_updates=true';
     var response = UrlFetchApp.fetch(url);
     Logger.log("Setup webhook response: " + response.getContentText());
+    createDailySearchSummaryTriggersIfNotExists();
     try {
       // Register commands after webhook setup
       if (Array.isArray(COMMANDS) && COMMANDS.length > 0) {
@@ -661,6 +662,29 @@ function sendMessage(chatId, text, replyMarkup = null) {
   Logger.log("Send message response: " + response.getContentText());
 }
 
+function sendPhoto(chatId, photoUrl, caption) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
+
+  const payload = {
+    chat_id: chatId,
+    photo: photoUrl
+  };
+  if (caption) {
+    payload.caption = caption;
+    payload.parse_mode = "HTML";
+  }
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(url, options);
+  Logger.log("Send photo response: " + response.getContentText());
+}
+
 // ============================================
 // 5. CHỈNH SỬA TIN NHẮN
 // ============================================
@@ -1154,13 +1178,34 @@ function handleGoldPriceSearchCommand(chatId, queryText) {
     throw new Error('Không lấy được dữ liệu giá vàng hôm nay.');
   }
 
+  var sjcBarCard = getSjcGoldBarCard(summary);
+  var sellComparison = buildSjcSellPriceComparison(summary, sjcBarCard);
+  var chartImageUrl = buildSjcGoldChartImageUrl(summary.sjcChart);
+
   var lines = [];
-  lines.push('🥇 <b>So sánh giá bán ra vàng hôm nay</b>');
+  lines.push('🥇 <b>So sánh giá bán ra vàng SJC hôm nay</b>');
   lines.push('Truy vấn: ' + escapeHtml(queryText));
   if (summary.titleDate) lines.push('Ngày: ' + escapeHtml(summary.titleDate));
   if (summary.updatedAt) lines.push('Cập nhật: ' + escapeHtml(summary.updatedAt));
   if (summary.sourceUrl) lines.push('Nguồn: ' + summary.sourceUrl);
   lines.push('');
+
+  if (sellComparison && sellComparison.current) {
+    lines.push('📍 <b>Giá vàng miếng SJC bán ra</b>');
+    lines.push('• Hôm nay: ' + escapeHtml(sellComparison.current.text));
+    if (sellComparison.yesterday) {
+      lines.push('• So với hôm qua (' + escapeHtml(sellComparison.yesterday.label) + '): ' + escapeHtml(sellComparison.yesterday.text));
+    } else {
+      lines.push('• So với hôm qua: chưa đủ dữ liệu biểu đồ để đối chiếu.');
+    }
+    if (sellComparison.lastWeek) {
+      lines.push('• So với tuần trước (' + escapeHtml(sellComparison.lastWeek.label) + '): ' + escapeHtml(sellComparison.lastWeek.text));
+    } else {
+      lines.push('• So với tuần trước: chưa đủ dữ liệu biểu đồ để đối chiếu.');
+    }
+    lines.push('• Đánh giá: ' + escapeHtml(sellComparison.assessment));
+    lines.push('');
+  }
 
   for (var i = 0; i < summary.cards.length; i++) {
     var card = summary.cards[i];
@@ -1193,8 +1238,187 @@ function handleGoldPriceSearchCommand(chatId, queryText) {
   }
 
   lines.push('');
-  lines.push('ℹ️ Phần "so với kỳ trước" là biến động do nguồn hiển thị, dùng để đối chiếu giá bán ra hôm nay với mốc trước đó gần nhất.');
+  lines.push('ℹ️ Mốc hôm qua và tuần trước được đối chiếu từ chuỗi dữ liệu biểu đồ 1 tháng trên giavang.org khi nguồn có đủ điểm dữ liệu.');
   sendLongMessage(chatId, lines.join('\n'));
+  if (chartImageUrl) {
+    sendPhoto(chatId, chartImageUrl, '📊 Biểu đồ giá vàng miếng SJC trong 1 tháng qua - nguồn dữ liệu: giavang.org');
+  }
+}
+
+function getSjcGoldBarCard(summary) {
+  var cards = summary && summary.cards ? summary.cards : [];
+  for (var i = 0; i < cards.length; i++) {
+    var title = normalizeVietnameseText(cards[i].title || '');
+    if (title.indexOf('gia vang mieng sjc') !== -1 || title.indexOf('vang mieng sjc') !== -1) {
+      return cards[i];
+    }
+  }
+  return cards.length > 0 ? cards[0] : null;
+}
+
+function buildSjcSellPriceComparison(summary, sjcBarCard) {
+  if (!sjcBarCard || !sjcBarCard.sellPrice) return null;
+  var currentThousand = parseVietnamesePriceToNumber(sjcBarCard.sellPrice);
+  if (currentThousand === null) return null;
+
+  var today = new Date();
+  var chart = summary && summary.sjcChart ? summary.sjcChart : null;
+  var sellSeries = chart && chart.sellSeries ? chart.sellSeries : [];
+  var yesterdayPoint = findNearestGoldPointByDay(sellSeries, addDays(today, -1), 2);
+  var lastWeekPoint = findNearestGoldPointByDay(sellSeries, addDays(today, -7), 3);
+
+  var comparison = {
+    current: {
+      value: currentThousand,
+      text: sjcBarCard.sellPrice + ' x1000đ/lượng (' + formatGoldMillionFromThousand(currentThousand) + ')'
+    },
+    yesterday: null,
+    lastWeek: null,
+    assessment: ''
+  };
+
+  if (yesterdayPoint) {
+    comparison.yesterday = buildGoldComparisonLine(currentThousand, yesterdayPoint);
+  }
+  if (lastWeekPoint) {
+    comparison.lastWeek = buildGoldComparisonLine(currentThousand, lastWeekPoint);
+  }
+
+  var parts = [];
+  if (comparison.yesterday) parts.push('so với hôm qua ' + comparison.yesterday.direction + ' ' + comparison.yesterday.deltaText);
+  if (comparison.lastWeek) parts.push('so với tuần trước ' + comparison.lastWeek.direction + ' ' + comparison.lastWeek.deltaText);
+  comparison.assessment = parts.length > 0
+    ? ('Giá bán ra hiện tại ' + parts.join('; ') + '.')
+    : 'Chưa đủ dữ liệu mốc trước để đánh giá tăng giảm tự động.';
+  return comparison;
+}
+
+function buildGoldComparisonLine(currentThousand, point) {
+  var previousThousand = Math.round(point.value * 1000);
+  var delta = currentThousand - previousThousand;
+  var direction = delta > 0 ? 'tăng' : (delta < 0 ? 'giảm' : 'không đổi');
+  return {
+    label: point.label,
+    direction: direction,
+    deltaText: formatGoldDelta(delta),
+    text: direction + ' ' + formatGoldDelta(delta) + ' từ mốc ' + formatGoldMillionFromThousand(previousThousand)
+  };
+}
+
+function formatGoldDelta(deltaThousand) {
+  var abs = Math.abs(deltaThousand);
+  return formatVietnameseNumber(abs) + ' x1000đ/lượng (' + formatGoldMillionFromThousand(abs) + ')';
+}
+
+function formatGoldMillionFromThousand(valueThousand) {
+  return formatVietnameseDecimal(valueThousand / 1000, 3) + ' triệu đồng/lượng';
+}
+
+function formatVietnameseDecimal(value, maxDecimals) {
+  if (value === null || isNaN(value)) return 'N/A';
+  var decimals = parseInt(maxDecimals, 10);
+  if (isNaN(decimals) || decimals < 0) decimals = 3;
+  var negative = value < 0;
+  var abs = Math.abs(value);
+  var fixed = abs.toFixed(decimals).replace(/\.?0+$/, '');
+  var parts = fixed.split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  var out = parts.length > 1 ? (parts[0] + ',' + parts[1]) : parts[0];
+  return negative ? ('-' + out) : out;
+}
+
+function addDays(dateValue, days) {
+  var d = new Date(dateValue.getTime());
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function findNearestGoldPointByDay(series, targetDate, toleranceDays) {
+  if (!series || series.length === 0) return null;
+  var targetStart = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0).getTime();
+  var best = null;
+  var bestDistance = null;
+  var maxDistance = (parseInt(toleranceDays, 10) || 1) * 24 * 60 * 60 * 1000;
+  for (var i = 0; i < series.length; i++) {
+    var item = series[i];
+    var d = new Date(item.time);
+    if (isNaN(d.getTime())) continue;
+    var itemDay = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0).getTime();
+    var distance = Math.abs(itemDay - targetStart);
+    if (distance > maxDistance) continue;
+    if (bestDistance === null || distance < bestDistance || (distance === bestDistance && item.time > best.time)) {
+      best = item;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function buildSjcGoldChartImageUrl(chartData) {
+  if (!chartData || !chartData.sellSeries || chartData.sellSeries.length === 0) return '';
+  var sell = chartData.sellSeries.slice(-40);
+  var buy = chartData.buySeries ? chartData.buySeries.slice(-40) : [];
+  var labels = [];
+  var sellValues = [];
+  var buyValues = [];
+
+  for (var i = 0; i < sell.length; i++) {
+    labels.push(sell[i].shortLabel || sell[i].label);
+    sellValues.push(sell[i].value);
+    if (buy[i] && buy[i].shortLabel === sell[i].shortLabel) {
+      buyValues.push(buy[i].value);
+    }
+  }
+
+  var datasets = [];
+  if (buyValues.length === labels.length) {
+    datasets.push({
+      label: 'Mua vào',
+      data: buyValues,
+      borderColor: '#16a34a',
+      backgroundColor: 'rgba(22, 163, 74, 0.10)',
+      fill: false,
+      lineTension: 0.15,
+      pointRadius: 2
+    });
+  }
+  datasets.push({
+    label: 'Bán ra',
+    data: sellValues,
+    borderColor: '#dc2626',
+    backgroundColor: 'rgba(220, 38, 38, 0.10)',
+    fill: false,
+    lineTension: 0.15,
+    pointRadius: 2
+  });
+
+  var config = {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: datasets
+    },
+    options: {
+      title: {
+        display: true,
+        text: chartData.title || 'Biểu đồ giá vàng miếng SJC trong 1 tháng qua'
+      },
+      legend: {
+        display: true,
+        position: 'bottom'
+      },
+      scales: {
+        yAxes: [{
+          scaleLabel: {
+            display: true,
+            labelString: 'Triệu đồng/lượng'
+          }
+        }]
+      }
+    }
+  };
+
+  return 'https://quickchart.io/chart?width=900&height=500&format=png&c=' + encodeURIComponent(JSON.stringify(config));
 }
 
 function formatGoldSpread(buyPriceText, sellPriceText) {
@@ -1247,6 +1471,7 @@ function fetchGoldPriceSummary() {
   if (nhanCard) cards.push(nhanCard);
 
   var tableSummary = extractGoldComparisonTable(html);
+  var sjcChart = extractGoldSjcChartData(html);
   return {
     titleDate: titleDate,
     updatedAt: updatedAt,
@@ -1254,7 +1479,8 @@ function fetchGoldPriceSummary() {
     cards: cards,
     bestBuy: tableSummary.bestBuy,
     bestSell: tableSummary.bestSell,
-    systems: tableSummary.systems
+    systems: tableSummary.systems,
+    sjcChart: sjcChart
   };
 }
 
@@ -1334,6 +1560,48 @@ function extractGoldComparisonTable(html) {
   return out;
 }
 
+function extractGoldSjcChartData(html) {
+  var source = String(html || '');
+  var title = 'Biểu đồ giá vàng miếng SJC trong 1 tháng qua';
+  var titleMatch = source.match(/<h2[^>]*id="bieudogiavang"[^>]*>([\s\S]*?)<\/h2>[\s\S]*?<p>([\s\S]*?)<\/p>/i);
+  if (titleMatch) {
+    title = stripHtmlTags(titleMatch[1] + ' - ' + titleMatch[2]);
+  }
+
+  return {
+    title: title,
+    buySeries: extractGoldChartSeriesByName(source, 'Mua vào'),
+    sellSeries: extractGoldChartSeriesByName(source, 'Bán ra')
+  };
+}
+
+function extractGoldChartSeriesByName(source, seriesName) {
+  var marker = 'name:"' + seriesName + '"';
+  var idx = String(source || '').indexOf(marker);
+  if (idx === -1) return [];
+  var dataIdx = source.indexOf('data:', idx);
+  if (dataIdx === -1) return [];
+  var endIdx = source.indexOf('],tooltip', dataIdx);
+  if (endIdx === -1) return [];
+  var rawData = source.substring(dataIdx + 5, endIdx + 1);
+  var out = [];
+  var pairRe = /\[(\d{10,}),\s*(-?\d+(?:\.\d+)?)\]/g;
+  var m;
+  while ((m = pairRe.exec(rawData)) !== null) {
+    var time = parseInt(m[1], 10);
+    var value = parseFloat(m[2]);
+    if (!time || isNaN(value)) continue;
+    var d = new Date(time);
+    out.push({
+      time: time,
+      value: value,
+      label: formatDateForSearchDisplay(d),
+      shortLabel: Utilities.formatDate(d, getScriptTimeZoneSafe(), 'dd/MM')
+    });
+  }
+  return out;
+}
+
 function normalizeVietnameseText(text) {
   return String(text || '')
     .toLowerCase()
@@ -1348,11 +1616,12 @@ function normalizeVietnameseText(text) {
     .trim();
 }
 
-function searchBraveWeb(queryText, count) {
+function searchBraveWeb(queryText, count, options) {
   if (typeof BRAVE_SEARCH_API_KEY === 'undefined' || !String(BRAVE_SEARCH_API_KEY || '').trim()) {
     throw new Error('BRAVE_SEARCH_API_KEY is not configured.');
   }
 
+  var opts = options || {};
   var resultCount = parseInt(count, 10);
   if (!resultCount || resultCount < 1) resultCount = 8;
   if (resultCount > 10) resultCount = 10;
@@ -1364,6 +1633,9 @@ function searchBraveWeb(queryText, count) {
     + '&search_lang=vi'
     + '&safesearch=moderate'
     + '&text_decorations=false';
+  if (opts.freshness) {
+    url += '&freshness=' + encodeURIComponent(String(opts.freshness));
+  }
 
   var response = UrlFetchApp.fetch(url, {
     method: 'get',
@@ -1408,6 +1680,364 @@ function stripHtmlTags(text) {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function sendDailyInternationalSearchSummary() {
+  try {
+    var text = buildInternationalSearchSummary();
+    sendLongMessage(CHAT_ID, text);
+  } catch (err) {
+    Logger.log('sendDailyInternationalSearchSummary error: ' + err.toString());
+    sendMessage(CHAT_ID, '❌ Lỗi khi tổng hợp bản tin quốc tế 9:30: ' + escapeHtml(err.toString()));
+  }
+}
+
+function sendDailyVietnamGovernmentSearchSummary() {
+  try {
+    var text = buildVietnamGovernmentSearchSummary();
+    sendLongMessage(CHAT_ID, text);
+  } catch (err) {
+    Logger.log('sendDailyVietnamGovernmentSearchSummary error: ' + err.toString());
+    sendMessage(CHAT_ID, '❌ Lỗi khi tổng hợp bản tin trong nước 15:30: ' + escapeHtml(err.toString()));
+  }
+}
+
+function createDailySearchSummaryTriggersIfNotExists() {
+  try {
+    var existing = {};
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction) {
+        existing[triggers[i].getHandlerFunction()] = true;
+      }
+    }
+    var tz = getScriptTimeZoneSafe();
+    if (!existing.sendDailyInternationalSearchSummary) {
+      ScriptApp.newTrigger('sendDailyInternationalSearchSummary')
+        .timeBased()
+        .atHour(9)
+        .nearMinute(30)
+        .everyDays(1)
+        .inTimezone(tz)
+        .create();
+      Logger.log('Created trigger for sendDailyInternationalSearchSummary() at 09:30');
+    }
+    if (!existing.sendDailyVietnamGovernmentSearchSummary) {
+      ScriptApp.newTrigger('sendDailyVietnamGovernmentSearchSummary')
+        .timeBased()
+        .atHour(15)
+        .nearMinute(30)
+        .everyDays(1)
+        .inTimezone(tz)
+        .create();
+      Logger.log('Created trigger for sendDailyVietnamGovernmentSearchSummary() at 15:30');
+    }
+  } catch (err) {
+    Logger.log('createDailySearchSummaryTriggersIfNotExists error: ' + err.toString());
+  }
+}
+
+function buildInternationalSearchSummary() {
+  var labels = getTodaySearchLabels();
+  var queries = [
+    {
+      title: 'Mỹ - Trung Quốc - Nga - ngoại giao',
+      query: 'tin quốc tế Mỹ Trung Quốc Nga ngoại giao hôm nay ' + labels.slash + ' dự kiến kế hoạch'
+    },
+    {
+      title: 'Chiến tranh - xung đột - xâm lược',
+      query: 'chiến tranh xung đột xâm lược xâm chiếm đánh nhau quốc tế hôm nay ' + labels.slash + ' dự kiến'
+    },
+    {
+      title: 'FED - lãi suất - tiền tệ Mỹ',
+      query: 'FED lãi suất chính sách tiền tệ Mỹ hôm nay ' + labels.slash + ' dự kiến kế hoạch'
+    },
+    {
+      title: 'Cách mạng - biểu tình - đảo chính',
+      query: 'cách mạng biểu tình đảo chính quốc tế hôm nay ' + labels.slash + ' dự kiến kế hoạch'
+    }
+  ];
+
+  var sections = collectScheduledSearchSections(queries, 4);
+  var allResults = flattenSearchSections(sections);
+  var warResults = filterWarRelatedResults(allResults);
+  var warDetailResults = buildWarDetailResults(warResults);
+  var exportSections = buildWarExportSections(warResults.concat(warDetailResults));
+
+  var lines = [];
+  lines.push('🌐 <b>Bản tin quốc tế 9:30</b>');
+  lines.push('Ngày: ' + labels.longText);
+  lines.push('Phạm vi: Mỹ, Trung Quốc, Nga, chiến tranh, ngoại giao, FED, cách mạng.');
+  lines.push('Bộ lọc: ưu tiên tin trong hôm nay hoặc kế hoạch trong tương lai.');
+  lines.push('');
+  appendScheduledSections(lines, sections);
+
+  if (warResults.length > 0) {
+    lines.push('⚔️ <b>Tin chiến tranh/xung đột cần theo dõi thêm</b>');
+    for (var i = 0; i < warResults.length && i < 4; i++) {
+      var item = warResults[i];
+      var countries = extractCountriesFromText(item.title + ' ' + item.description);
+      lines.push((i + 1) + '. ' + escapeHtml(item.title));
+      if (countries.length > 0) lines.push('   Nước/vùng liên quan phát hiện: ' + escapeHtml(countries.join(', ')));
+      if (item.url) lines.push('   ' + item.url);
+    }
+    lines.push('');
+  }
+
+  if (warDetailResults.length > 0) {
+    lines.push('🧭 <b>Tìm kiếm bổ sung: đánh nhau/xâm lược/chiếm nước nào</b>');
+    for (var wd = 0; wd < warDetailResults.length && wd < 4; wd++) {
+      var detail = warDetailResults[wd];
+      var detailCountries = extractCountriesFromText(detail.title + ' ' + detail.description);
+      lines.push((wd + 1) + '. ' + escapeHtml(detail.title));
+      if (detail.description) lines.push('   ' + escapeHtml(detail.description));
+      if (detailCountries.length > 0) lines.push('   Nước/vùng liên quan phát hiện: ' + escapeHtml(detailCountries.join(', ')));
+      if (detail.url) lines.push('   ' + detail.url);
+    }
+    lines.push('');
+  }
+
+  if (exportSections.length > 0) {
+    lines.push('🏭 <b>Ngành xuất khẩu chính của nước/vùng liên quan</b>');
+    for (var e = 0; e < exportSections.length; e++) {
+      var sec = exportSections[e];
+      lines.push('• <b>' + escapeHtml(sec.country) + '</b>');
+      for (var r = 0; r < sec.items.length && r < 2; r++) {
+        var ref = sec.items[r];
+        lines.push('  - ' + escapeHtml(ref.title));
+        if (ref.description) lines.push('    ' + escapeHtml(ref.description));
+      }
+    }
+    lines.push('');
+  }
+
+  if (allResults.length === 0) {
+    lines.push('Không tìm thấy tin phù hợp trong lần chạy này.');
+  }
+  lines.push('✅ Đã tổng hợp xong và gửi vào CHAT_ID.');
+  return lines.join('\n');
+}
+
+function buildVietnamGovernmentSearchSummary() {
+  var labels = getTodaySearchLabels();
+  var queries = [
+    {
+      title: 'Chính sách Chính phủ',
+      query: 'site:chinhphu.vn Chính phủ chính sách Việt Nam hôm nay ' + labels.slash + ' dự kiến kế hoạch'
+    },
+    {
+      title: 'Thủ tướng Việt Nam',
+      query: 'site:chinhphu.vn Thủ tướng chỉ đạo chủ trương chính sách hôm nay ' + labels.slash + ' dự kiến'
+    },
+    {
+      title: 'Tổng Bí thư - chủ trương',
+      query: 'site:dangcongsan.vn Tổng Bí thư chủ trương Việt Nam hôm nay ' + labels.slash + ' dự kiến'
+    },
+    {
+      title: 'Tiền tệ - Ngân hàng Nhà nước',
+      query: 'site:sbv.gov.vn chính sách tiền tệ Ngân hàng Nhà nước hôm nay ' + labels.slash + ' dự kiến kế hoạch'
+    }
+  ];
+
+  var sections = collectScheduledSearchSections(queries, 4);
+  var lines = [];
+  lines.push('🇻🇳 <b>Bản tin trong nước 15:30</b>');
+  lines.push('Ngày: ' + labels.longText);
+  lines.push('Phạm vi: chính sách, tiền tệ, chủ trương của Tổng Bí thư và Thủ tướng Việt Nam.');
+  lines.push('Bộ lọc: ưu tiên nguồn chính phủ/Đảng/NHNN, tin trong hôm nay hoặc kế hoạch trong tương lai.');
+  lines.push('');
+  appendScheduledSections(lines, sections);
+  if (flattenSearchSections(sections).length === 0) {
+    lines.push('Không tìm thấy tin phù hợp trong lần chạy này.');
+  }
+  lines.push('✅ Đã tổng hợp xong và gửi vào CHAT_ID.');
+  return lines.join('\n');
+}
+
+function collectScheduledSearchSections(queryDefs, perQueryCount) {
+  var sections = [];
+  var seen = {};
+  for (var i = 0; i < queryDefs.length; i++) {
+    var def = queryDefs[i];
+    var items = [];
+    try {
+      var results = searchBraveWeb(def.query, perQueryCount || 4, { freshness: 'pd' });
+      for (var r = 0; r < (results || []).length; r++) {
+        var item = results[r];
+        if (!item.url || seen[item.url]) continue;
+        seen[item.url] = true;
+        if (!isTodayOrFutureSearchResult(item)) continue;
+        items.push(item);
+      }
+    } catch (err) {
+      Logger.log('collectScheduledSearchSections query error: ' + def.query + ' -> ' + err.toString());
+    }
+    sections.push({
+      title: def.title,
+      query: def.query,
+      items: items
+    });
+  }
+  return sections;
+}
+
+function appendScheduledSections(lines, sections) {
+  for (var s = 0; s < sections.length; s++) {
+    var sec = sections[s];
+    lines.push('🔹 <b>' + escapeHtml(sec.title) + '</b>');
+    if (!sec.items || sec.items.length === 0) {
+      lines.push('• Chưa tìm thấy tin phù hợp.');
+      lines.push('');
+      continue;
+    }
+    for (var i = 0; i < sec.items.length && i < 4; i++) {
+      var item = sec.items[i];
+      lines.push((i + 1) + '. <b>' + escapeHtml(item.title) + '</b>');
+      if (item.description) lines.push('   ' + escapeHtml(item.description));
+      if (item.url) lines.push('   ' + item.url);
+    }
+    lines.push('');
+  }
+}
+
+function flattenSearchSections(sections) {
+  var out = [];
+  for (var s = 0; s < (sections || []).length; s++) {
+    var items = sections[s].items || [];
+    for (var i = 0; i < items.length; i++) out.push(items[i]);
+  }
+  return out;
+}
+
+function isTodayOrFutureSearchResult(item) {
+  var labels = getTodaySearchLabels();
+  var hay = normalizeVietnameseText([item.title || '', item.description || ''].join(' '));
+  var slash = labels.slash.replace(/\//g, '/');
+  var compactSlash = labels.slash.replace(/\//g, '-');
+  var futureWords = [
+    'se ', 'du kien', 'ke hoach', 'sap toi', 'tuong lai', 'chuan bi',
+    'ngay mai', 'tuan toi', 'thang toi', 'nam toi', 'upcoming', 'planned',
+    'scheduled', 'plan', 'will', 'next'
+  ];
+  if (hay.indexOf('hom nay') !== -1 || hay.indexOf('today') !== -1) return true;
+  if (hay.indexOf(normalizeVietnameseText(labels.longText)) !== -1) return true;
+  if (hay.indexOf(slash) !== -1 || hay.indexOf(compactSlash) !== -1 || hay.indexOf(labels.iso) !== -1) return true;
+  for (var i = 0; i < futureWords.length; i++) {
+    if (hay.indexOf(futureWords[i]) !== -1) return true;
+  }
+  return false;
+}
+
+function filterWarRelatedResults(results) {
+  var out = [];
+  for (var i = 0; i < (results || []).length; i++) {
+    var item = results[i];
+    var hay = normalizeVietnameseText([item.title || '', item.description || ''].join(' '));
+    if (/(chien tranh|xung dot|tan cong|danh nhau|xam luoc|xam chiem|chiem dong|khong kich|phao kich|war|conflict|attack|invasion|invade|occupy)/i.test(hay)) {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function buildWarDetailResults(warResults) {
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < (warResults || []).length && i < 3; i++) {
+    var base = warResults[i];
+    var q = 'đánh nhau xâm lược xâm chiếm chiếm nước nào ' + (base.title || '');
+    try {
+      var results = searchBraveWeb(q, 3, { freshness: 'pd' });
+      for (var r = 0; r < (results || []).length; r++) {
+        var item = results[r];
+        if (!item.url || seen[item.url]) continue;
+        seen[item.url] = true;
+        if (!isTodayOrFutureSearchResult(item)) continue;
+        out.push(item);
+      }
+    } catch (err) {
+      Logger.log('buildWarDetailResults error: ' + err.toString());
+    }
+  }
+  return out;
+}
+
+function buildWarExportSections(warResults) {
+  var countries = [];
+  var seen = {};
+  for (var i = 0; i < (warResults || []).length; i++) {
+    var found = extractCountriesFromText(warResults[i].title + ' ' + warResults[i].description);
+    for (var j = 0; j < found.length; j++) {
+      if (!seen[found[j]]) {
+        seen[found[j]] = true;
+        countries.push(found[j]);
+      }
+    }
+  }
+
+  var sections = [];
+  for (var c = 0; c < countries.length && c < 3; c++) {
+    try {
+      var q = 'ngành xuất khẩu chính của ' + countries[c] + ' mặt hàng xuất khẩu chủ lực';
+      var items = searchBraveWeb(q, 3);
+      if (items && items.length > 0) {
+        sections.push({
+          country: countries[c],
+          items: items
+        });
+      }
+    } catch (err) {
+      Logger.log('buildWarExportSections error for ' + countries[c] + ': ' + err.toString());
+    }
+  }
+  return sections;
+}
+
+function extractCountriesFromText(text) {
+  var hay = normalizeVietnameseText(text);
+  var defs = [
+    ['Mỹ', ['my', 'hoa ky', 'united states', 'u s', 'usa']],
+    ['Trung Quốc', ['trung quoc', 'china', 'bac kinh']],
+    ['Nga', ['nga', 'russia', 'moscow']],
+    ['Ukraine', ['ukraine', 'ucraina', 'kyiv', 'kiev']],
+    ['Đài Loan', ['dai loan', 'taiwan']],
+    ['Israel', ['israel']],
+    ['Palestine/Gaza', ['palestine', 'palestin', 'gaza']],
+    ['Iran', ['iran']],
+    ['Syria', ['syria', 'syria']],
+    ['Lebanon', ['lebanon', 'liban']],
+    ['Yemen', ['yemen']],
+    ['Ấn Độ', ['an do', 'india']],
+    ['Pakistan', ['pakistan']],
+    ['Triều Tiên', ['trieu tien', 'north korea']],
+    ['Hàn Quốc', ['han quoc', 'south korea']],
+    ['Myanmar', ['myanmar', 'mien dien']],
+    ['Thái Lan', ['thai lan', 'thailand']],
+    ['Campuchia', ['campuchia', 'campuchia', 'cambodia']],
+    ['Sudan', ['sudan']],
+    ['CHDC Congo', ['congo']],
+    ['Venezuela', ['venezuela']]
+  ];
+  var out = [];
+  for (var i = 0; i < defs.length; i++) {
+    for (var j = 0; j < defs[i][1].length; j++) {
+      if (hay.indexOf(defs[i][1][j]) !== -1) {
+        out.push(defs[i][0]);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+function getTodaySearchLabels() {
+  var now = new Date();
+  var tz = getScriptTimeZoneSafe();
+  return {
+    slash: Utilities.formatDate(now, tz, 'dd/MM/yyyy'),
+    iso: Utilities.formatDate(now, tz, 'yyyy-MM-dd'),
+    longText: Utilities.formatDate(now, tz, 'dd/MM/yyyy')
+  };
 }
 
 // ============================================
